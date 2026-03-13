@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flightplan-frontend
+  namespace: flightplan
+  labels:
+    app: flightplan-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flightplan-frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: flightplan-frontend
+    spec:
+      # IM8 S1: do not mount service-account token
+      automountServiceAccountToken: false
+      containers:
+        - name: frontend
+          image: ghcr.io/${GITHUB_REPOSITORY_OWNER}/flightplan-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080   # matches Dockerfile EXPOSE and nginx listen
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          # IM8 S1: non-root, read-only filesystem, drop all Linux capabilities
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001        # matches nginx uid set in Dockerfile
+            runAsGroup: 1001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # nginx needs writable tmp dirs even with readOnlyRootFilesystem
+          volumeMounts:
+            - mountPath: /tmp/nginx
+              name: nginx-tmp
+            - mountPath: /var/cache/nginx
+              name: nginx-cache
+            - mountPath: /var/run
+              name: nginx-run
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+      terminationGracePeriodSeconds: 15
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: flightplan
+spec:
+  selector:
+    app: flightplan-frontend
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+
+---
+# IM8 S7: Network Policy — frontend only accepts ingress from the Ingress controller
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-netpol
+  namespace: flightplan
+spec:
+  podSelector:
+    matchLabels:
+      app: flightplan-frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+  egress:
+    # Frontend nginx proxies to backend only
+    - to:
+        - podSelector:
+            matchLabels:
+              app: flightplan-backend
+      ports:
+        - port: 8080

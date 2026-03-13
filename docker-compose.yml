@@ -1,0 +1,108 @@
+# IM8-hardened docker-compose for local development and CI smoke tests.
+# NOTE: 'version' key is deprecated in Compose v2+ and is omitted.
+
+services:
+
+  # ─── Redis (leader election for FlightDataCache) ──────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: flightplan-redis
+    command: >
+      redis-server
+      --requirepass "${REDIS_PASSWORD:-changeme-dev-only}"
+      --appendonly yes
+      --appendfsync everysec
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme-dev-only}
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend-net
+    # IM8 S1: non-root, read-only root fs, no privilege escalation
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme-dev-only}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Backend ──────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend/backend-im8
+      dockerfile: Dockerfile
+    container_name: flightplan-backend
+    environment:
+      - FLIGHT_API_BASE_URL=${FLIGHT_API_BASE_URL:-https://mock-api.example.com}
+      - FLIGHT_API_KEY=${FLIGHT_API_KEY:-mock-api-key-for-dev}
+      - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-default}
+      # IM8 S7: explicit CORS allowlist — no wildcard
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      # Redis leader election
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme-dev-only}
+      - LEADER_LOCK_TTL_MS=${LEADER_LOCK_TTL_MS:-30000}
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - backend-net
+      - frontend-net
+    # IM8 S1: non-root, read-only root filesystem, drop all capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+
+  # ─── Frontend ─────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: flightplan-frontend
+    # IM8 S1: nginx runs as uid 1001 inside the container
+    ports:
+      - "3000:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - frontend-net
+    # IM8 S1: read-only root, no privilege escalation
+    read_only: true
+    tmpfs:
+      - /tmp/nginx
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+# ─── Networks ────────────────────────────────────────────────────────
+# IM8 S7: segment networks — frontend cannot reach Redis directly
+networks:
+  backend-net:
+    driver: bridge
+  frontend-net:
+    driver: bridge
+
+# ─── Volumes ─────────────────────────────────────────────────────────
+volumes:
+  redis-data:

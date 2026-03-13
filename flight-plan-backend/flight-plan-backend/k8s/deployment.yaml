@@ -1,0 +1,213 @@
+# ============================================================================
+# Kubernetes Deployment – IM8-compliant Flight Plan Backend
+# ============================================================================
+#
+# Security controls implemented here:
+#  IM8 S1  – Pod Security Context: non-root, read-only root FS, dropped capabilities
+#  IM8 S3  – Secrets: API key and Redis password via secretKeyRef (never in env literals)
+#  IM8 S4  – Availability: liveness/readiness probes, HPA-safe leader election
+#  IM8 S5  – Data in Transit: TLS at Ingress; Redis SSL toggle
+#  IM8 S7  – Network Policy: restrict ingress/egress (see NetworkPolicy below)
+# ============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-plan-backend
+  namespace: flight-plan
+  labels:
+    app: flight-plan-backend
+    version: "1.0.0"
+    # IM8 labelling for asset inventory
+    govtech.gov.sg/classification: restricted
+    govtech.gov.sg/im8-compliant: "true"
+spec:
+  replicas: 3   # scale freely – leader election ensures only 1 pod fetches data
+  selector:
+    matchLabels:
+      app: flight-plan-backend
+  template:
+    metadata:
+      labels:
+        app: flight-plan-backend
+    spec:
+      # IM8 S1: Never run as root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault      # use container runtime default seccomp profile
+
+      containers:
+        - name: flight-plan-backend
+          image: your-registry/flight-plan-backend:1.0.0
+          imagePullPolicy: Always   # always pull – ensures latest security patches
+
+          ports:
+            - containerPort: 8080
+              name: http
+
+          # IM8 S1: Hardened container security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # prevents runtime file writes
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL               # drop every Linux capability
+
+          # ─── Environment Variables ────────────────────────────────────────
+          env:
+            # IM8 S3 (Secrets Management): credentials injected from K8s Secrets.
+            # Create the secret before deploying:
+            #   kubectl create secret generic flight-api-secret \
+            #     --from-literal=api-key=<real-key> \
+            #     --from-literal=base-url=https://real-api.example.com \
+            #     -n flight-plan
+            - name: FLIGHT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: flight-api-secret
+                  key: api-key
+            - name: FLIGHT_API_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: flight-api-secret
+                  key: base-url
+
+            # Redis for leader election
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: flight-plan-config
+                  key: redis-host
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: flight-plan-config
+                  key: redis-port
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: password
+
+            # IM8 S7 CORS: approved frontend origin(s) only
+            - name: CORS_ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: flight-plan-config
+                  key: cors-allowed-origins
+
+          # ─── Resource Limits ──────────────────────────────────────────────
+          # IM8 S4: Explicit CPU/memory limits prevent noisy-neighbour DoS
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+          # ─── Probes ───────────────────────────────────────────────────────
+          # IM8 S4: Separate liveness and readiness for safe rolling upgrades
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # IM8 S1: Mount a writable tmp dir for the JVM (read-only root FS requires this)
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+      # IM8 S1: Do not automount the default service account token
+      automountServiceAccountToken: false
+
+---
+# ============================================================================
+# NetworkPolicy – IM8 S7: restrict pod ingress/egress to minimum required
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flight-plan-backend-netpol
+  namespace: flight-plan
+spec:
+  podSelector:
+    matchLabels:
+      app: flight-plan-backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only accept traffic from the Ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+    # Allow upstream flight API (HTTPS)
+    - ports:
+        - protocol: TCP
+          port: 443
+    # Allow Redis (leader election)
+    - ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# ============================================================================
+# HorizontalPodAutoscaler – scales replicas; leader election handles deduplication
+# ============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: flight-plan-backend-hpa
+  namespace: flight-plan
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: flight-plan-backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

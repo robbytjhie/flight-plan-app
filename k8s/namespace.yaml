@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flightplan
+  labels:
+    app: flightplan
+    environment: production
+    # IM8: classification label for audit / policy tooling
+    security.gov.sg/im8-classification: restricted

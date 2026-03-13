@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flightplan-backend
+  namespace: flightplan
+  labels:
+    app: flightplan-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flightplan-backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: flightplan-backend
+    spec:
+      # IM8 S1: do not mount service-account token unless required
+      automountServiceAccountToken: false
+      containers:
+        - name: backend
+          image: ghcr.io/${GITHUB_REPOSITORY_OWNER}/flightplan-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: FLIGHT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: FLIGHT_API_KEY
+            - name: FLIGHT_API_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: FLIGHT_API_BASE_URL
+            # IM8 S7: CORS allowlist from secret — no wildcard
+            - name: CORS_ALLOWED_ORIGINS
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: CORS_ALLOWED_ORIGINS
+            # Redis leader election
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: REDIS_PASSWORD
+            - name: LEADER_LOCK_TTL_MS
+              value: "30000"
+          resources:
+            requests:
+              memory: "512Mi"   # bumped: Spring Boot + Redis client needs headroom
+              cpu: "200m"
+            limits:
+              memory: "768Mi"
+              cpu: "500m"
+          # IM8 S1: minimal container privileges
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Spring Boot needs /tmp for Tomcat work dir
+          volumeMounts:
+            - mountPath: /tmp
+              name: tmp-volume
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: flightplan
+spec:
+  selector:
+    app: flightplan-backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+
+---
+# IM8 S7: Network Policy — backend only accepts traffic from frontend and redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-netpol
+  namespace: flightplan
+spec:
+  podSelector:
+    matchLabels:
+      app: flightplan-backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: flightplan-frontend
+      ports:
+        - port: 8080
+  egress:
+    # Allow Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: flightplan-redis
+      ports:
+        - port: 6379
+    # Allow upstream Flight Manager API (DNS + HTTPS)
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 443

@@ -1,0 +1,354 @@
+name: CI/CD — Build, Test, Quality Gate & Deploy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trigger matrix:
+#   pull_request  → test-backend + test-frontend + scan + Sonar (no deploy)
+#   push develop  → all of the above + build images + deploy Kubernetes staging
+#   push main     → all of the above + build images + deploy Kubernetes prod
+#   tag v*.*.*    → same as main push
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ main, develop ]
+    tags:     [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  JAVA_VERSION:      '17'
+  REGISTRY:          ghcr.io
+  BACKEND_IMAGE:     ${{ github.repository_owner }}/flightplan-backend
+  FRONTEND_IMAGE:    ${{ github.repository_owner }}/flightplan-frontend
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Backend: compile, unit tests, integration tests, JaCoCo, Sonar
+  # ─────────────────────────────────────────────────────────────────────────
+  test-backend:
+    name: 🧪 Backend — Test · Coverage · Sonar
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: flight-plan-backend/flight-plan-backend
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # Sonar needs full history for blame & new-code detection
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      # ── Unit tests (surefire: **/*Test.java) ─────────────────────────────
+      - name: Run unit tests
+        run: |
+          mvn -B test \
+            -Dspring.profiles.active=dev \
+            -Dsecurity.cors.allowed-origins=http://localhost:3000
+        env:
+          MAVEN_OPTS: '-Xmx1g'
+
+      # ── Integration tests (failsafe: **/*IT.java) ─────────────────────────
+      - name: Run integration tests
+        run: |
+          mvn -B failsafe:integration-test failsafe:verify \
+            -Dspring.profiles.active=dev \
+            -Dsecurity.cors.allowed-origins=http://localhost:3000
+        env:
+          MAVEN_OPTS: '-Xmx1g'
+
+      # ── JaCoCo coverage enforcement (≥90% line, ≥85% branch) ─────────────
+      - name: JaCoCo coverage report & enforcement
+        run: |
+          mvn -B jacoco:report jacoco:check \
+            -Djacoco.line.minimum=0.90 \
+            -Djacoco.branch.minimum=0.85
+
+      - name: Upload JaCoCo HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jacoco-report
+          path: flight-plan-backend/flight-plan-backend/target/site/jacoco/
+          retention-days: 14
+
+      # ── SonarCloud quality gate ───────────────────────────────────────────
+      # Gate requirements: coverage ≥ 90%, 0 blocker/critical issues,
+      # 0 unreviewed security hotspots.
+      - name: SonarCloud analysis
+        run: |
+          mvn -B sonar:sonar \
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }} \
+            -Dsonar.organization=${{ secrets.SONAR_ORG }} \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.token=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+            -Dsonar.qualitygate.wait=true \
+            -Dsonar.qualitygate.timeout=300
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Build fat JAR ─────────────────────────────────────────────────────
+      - name: Package JAR
+        run: mvn -B package -DskipTests
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: flight-plan-backend/flight-plan-backend/target/*.jar
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Frontend: lint, test, build
+  # ─────────────────────────────────────────────────────────────────────────
+  test-frontend:
+    name: 🧪 Frontend — Lint · Test · Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm test --if-present
+
+      - name: Build
+        run: npm run build
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Vulnerability scan (Trivy) on Docker images
+  # Runs on every push and PR — blocks pipeline on HIGH/CRITICAL CVEs
+  # ─────────────────────────────────────────────────────────────────────────
+  scan-images:
+    name: 🔍 Container Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: [ test-backend, test-frontend ]
+    permissions:
+      contents: read
+      security-events: write      # upload SARIF to GitHub Security tab
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download JAR for backend scan
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: flight-plan-backend/flight-plan-backend/target/
+
+      - name: Build backend image (local, scan only)
+        run: docker build -t flightplan-backend:scan ./flight-plan-backend/flight-plan-backend
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: flightplan-backend:scan
+          format: sarif
+          output: trivy-backend.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'          # IM8: fail on HIGH/CRITICAL CVEs
+
+      - name: Build frontend image (local, scan only)
+        run: docker build -t flightplan-frontend:scan ./frontend
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: flightplan-frontend:scan
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Upload Trivy SARIF results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: '.'
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 4 — Build & push Docker images to GHCR
+  # Runs only on push to main/develop or release tag (not on PRs)
+  # ─────────────────────────────────────────────────────────────────────────
+  build-push-images:
+    name: 🐳 Build & Push Images → GHCR
+    runs-on: ubuntu-latest
+    needs: [ scan-images ]
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/develop' ||
+       startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      short-sha:    ${{ steps.sha.outputs.short }}
+      backend-tag:  ${{ steps.meta-backend.outputs.version }}
+      frontend-tag: ${{ steps.meta-frontend.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: flight-plan-backend/flight-plan-backend/target/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry:  ${{ env.REGISTRY }}
+          username:  ${{ github.actor }}
+          password:  ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Backend image ────────────────────────────────────────────────────
+      - name: Docker metadata — backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=ref,event=branch,prefix={{branch}}-,suffix=-{{sha}}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context:    ./flight-plan-backend/flight-plan-backend
+          push:       true
+          tags:       ${{ steps.meta-backend.outputs.tags }}
+          labels:     ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      # ── Frontend image ────────────────────────────────────────────────────
+      - name: Docker metadata — frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=ref,event=branch,prefix={{branch}}-,suffix=-{{sha}}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context:    ./frontend
+          push:       true
+          tags:       ${{ steps.meta-frontend.outputs.tags }}
+          labels:     ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 5 — Deploy to Kubernetes (staging on develop, prod on main/tag)
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy → Kubernetes ${{ github.ref == 'refs/heads/develop' && '(Staging)' || '(Production)' }}
+    runs-on: ubuntu-latest
+    needs: build-push-images
+    if: |
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop' ||
+      startsWith(github.ref, 'refs/tags/v')
+    environment: ${{ github.ref == 'refs/heads/develop' && 'staging' || 'production' }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: latest
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Dry-run validate manifests
+        run: |
+          kubectl apply --dry-run=client -f k8s/namespace.yaml
+          kubectl apply --dry-run=client -f k8s/redis.yaml
+          kubectl apply --dry-run=client -f k8s/backend.yaml
+          kubectl apply --dry-run=client -f k8s/frontend.yaml
+          kubectl apply --dry-run=client -f k8s/ingress.yaml
+          kubectl apply --dry-run=client -f k8s/hpa.yaml
+
+      # IM8: do NOT apply secret.yaml in CI — secrets must be pre-provisioned
+      # in the cluster via external secrets operator or manual kubectl create.
+      - name: Apply Kubernetes manifests (no secrets)
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/redis.yaml
+          kubectl apply -f k8s/backend.yaml
+          kubectl apply -f k8s/frontend.yaml
+          kubectl apply -f k8s/ingress.yaml
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Pin images to this SHA
+        run: |
+          SHA=${{ needs.build-push-images.outputs.short-sha }}
+          kubectl set image deployment/flightplan-backend \
+            backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:main-sha-${SHA} \
+            -n flightplan
+          kubectl set image deployment/flightplan-frontend \
+            frontend=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:main-sha-${SHA} \
+            -n flightplan
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/flightplan-backend  -n flightplan --timeout=120s
+          kubectl rollout status deployment/flightplan-frontend -n flightplan --timeout=60s
+
+      - name: Verify deployment
+        run: |
+          echo "📦 Backend pods:"
+          kubectl get pods -n flightplan -l app=flightplan-backend
+          echo ""
+          echo "🖥️  Frontend pods:"
+          kubectl get pods -n flightplan -l app=flightplan-frontend
+          echo ""
+          echo "🌐 Services:"
+          kubectl get services -n flightplan

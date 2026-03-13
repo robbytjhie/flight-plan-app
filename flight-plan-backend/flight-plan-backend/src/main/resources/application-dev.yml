@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# DEV PROFILE  —  mock data, Redis optional
+#
+# Activate:  mvn spring-boot:run -Dspring-boot.run.profiles=dev
+#            (also the default — SPRING_PROFILES_ACTIVE defaults to dev)
+#
+# What this profile does:
+#   ✅  Serves mock flight data — no calls to api.swimapisg.info
+#   ✅  Redis OPTIONAL — probed at startup, graceful fallback if not running:
+#         Redis running   →  RedisLockRegistry  (prod-like, good for debugging)
+#         Redis not running → DefaultLockRegistry (in-memory, zero config needed)
+#   ✅  Swagger UI enabled
+#   ✅  DEBUG logging
+#
+# To test Redis behaviour locally (recommended when investigating prod issues):
+#   docker run -d -p 6379:6379 --name redis redis:alpine
+#   mvn spring-boot:run -Dspring-boot.run.profiles=dev
+#   → look for: [LEADER] dev — Redis reachable, using RedisLockRegistry
+#
+# To run without Redis (quick offline dev):
+#   mvn spring-boot:run -Dspring-boot.run.profiles=dev   (just don't start Redis)
+#   → look for: [LEADER] dev — Redis not reachable ... Falling back to in-memory
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Redis connection (optional in dev) ───────────────────────────────────────
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+# ── Leader lock TTL ───────────────────────────────────────────────────────────
+leader:
+  lock:
+    ttl-ms: 50000
+
+# ── Verbose logging for development ──────────────────────────────────────────
+logging:
+  level:
+    com.flightplan: DEBUG
+    org.springframework.web: INFO

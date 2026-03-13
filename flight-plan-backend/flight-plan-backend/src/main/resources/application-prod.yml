@@ -1,0 +1,63 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# PROD PROFILE  —  real API, Redis leader lock
+#
+# Activate:  SPRING_PROFILES_ACTIVE=prod  (env var — set in K8s / Docker)
+#
+# What this profile does:
+#   ✅  Calls real upstream API at https://api.swimapisg.info
+#   ✅  Injects apikey header via FLIGHT_API_KEY environment variable
+#   ✅  Redis distributed lock for multi-pod leader election
+#   ✅  Swagger UI disabled (not exposed in production)
+#   ✅  INFO-level logging only
+#
+# Required environment variables / K8s Secrets:
+#   FLIGHT_API_KEY    — API key for api.swimapisg.info
+#   REDIS_HOST        — Redis hostname (default: localhost)
+#   REDIS_PORT        — Redis port (default: 6379)
+#   REDIS_PASSWORD    — Redis auth password (injected from K8s Secret)
+#   CORS_ALLOWED_ORIGINS — production frontend domain
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Upstream API ─────────────────────────────────────────────────────────────
+# IM8 S5: API key MUST come from environment / K8s Secret — never hardcode here.
+# K8s pod spec:
+#   env:
+#     - name: FLIGHT_API_KEY
+#       valueFrom:
+#         secretKeyRef:
+#           name: flight-api-secret
+#           key: api-key
+flight:
+  api:
+    base-url: https://api.swimapisg.info
+    key: ${FLIGHT_API_KEY}           # no default — fails fast if not set
+
+# ── Redis — required for distributed leader election ─────────────────────────
+# IM8 S5 (Data at Rest): credentials injected from K8s Secret
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      ssl:
+        enabled: ${REDIS_SSL_ENABLED:false}
+
+# ── Leader lock: Redis distributed lock ──────────────────────────────────────
+leader:
+  lock:
+    ttl-ms: ${LEADER_LOCK_TTL_MS:50000}
+
+# ── Swagger UI: disabled in production ───────────────────────────────────────
+# IM8 S6: do not expose API schema publicly
+springdoc:
+  swagger-ui:
+    enabled: false
+  api-docs:
+    enabled: false
+
+# ── Production logging — INFO only ───────────────────────────────────────────
+logging:
+  level:
+    com.flightplan: INFO
+    org.springframework.web: WARN
