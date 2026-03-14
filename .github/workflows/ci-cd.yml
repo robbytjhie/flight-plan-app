@@ -46,30 +46,20 @@ jobs:
           distribution: temurin
           cache: maven
 
-      # ── Unit tests (surefire: **/*Test.java) ─────────────────────────────
-      - name: Run unit tests
+      # ── Tests + JaCoCo coverage (single mvn verify pass) ────────────────────
+      # WHY ONE STEP: separate mvn invocations each overwrite target/jacoco.exec.
+      # A second pass without -Dspring.profiles.active=dev causes @Profile('dev')
+      # beans to be absent, Spring context failures, tests skipped, and jacoco
+      # measuring near-zero coverage. One pass = one exec file = correct numbers.
+      - name: Test, report & enforce coverage
         run: |
-          mvn -B test \
+          mvn -B verify \
             -Dspring.profiles.active=dev \
-            -Dsecurity.cors.allowed-origins=http://localhost:3000
-        env:
-          MAVEN_OPTS: '-Xmx1g'
-
-      # ── Integration tests (failsafe: **/*IT.java) ─────────────────────────
-      - name: Run integration tests
-        run: |
-          mvn -B failsafe:integration-test failsafe:verify \
-            -Dspring.profiles.active=dev \
-            -Dsecurity.cors.allowed-origins=http://localhost:3000
-        env:
-          MAVEN_OPTS: '-Xmx1g'
-
-      # ── JaCoCo coverage enforcement (≥90% line, ≥85% branch) ─────────────
-      - name: JaCoCo coverage report & enforcement
-        run: |
-          mvn -B verify -DskipITs \
+            -Dsecurity.cors.allowed-origins=http://localhost:3000 \
             -Djacoco.line.minimum=0.90 \
             -Djacoco.branch.minimum=0.85
+        env:
+          MAVEN_OPTS: '-Xmx1g'
 
       - name: Upload JaCoCo HTML report
         uses: actions/upload-artifact@v4
