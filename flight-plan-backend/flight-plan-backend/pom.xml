@@ -23,6 +23,7 @@
     <jacoco.version>0.8.11</jacoco.version>
     <jacoco.line.minimum>0.90</jacoco.line.minimum>
     <jacoco.branch.minimum>0.85</jacoco.branch.minimum>
+    <sonar.organization>robbytjhie</sonar.organization>
   </properties>
 
   <dependencies>
