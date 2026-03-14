@@ -133,20 +133,55 @@
         <artifactId>jacoco-maven-plugin</artifactId>
         <version>${jacoco.version}</version>
         <executions>
+          <!-- Unit test agent: writes to jacoco-ut.exec -->
           <execution>
             <id>prepare-agent</id>
             <goals><goal>prepare-agent</goal></goals>
+            <configuration>
+              <destFile>${project.build.directory}/jacoco-ut.exec</destFile>
+            </configuration>
+          </execution>
+          <!-- IT agent: writes to jacoco-it.exec (does NOT overwrite unit exec) -->
+          <execution>
+            <id>prepare-agent-integration</id>
+            <phase>pre-integration-test</phase>
+            <goals><goal>prepare-agent-integration</goal></goals>
+            <configuration>
+              <destFile>${project.build.directory}/jacoco-it.exec</destFile>
+            </configuration>
+          </execution>
+          <!-- Merge both exec files into jacoco.exec before report + check -->
+          <execution>
+            <id>merge</id>
+            <phase>post-integration-test</phase>
+            <goals><goal>merge</goal></goals>
+            <configuration>
+              <fileSets>
+                <fileSet>
+                  <directory>${project.build.directory}</directory>
+                  <includes>
+                    <include>jacoco-ut.exec</include>
+                    <include>jacoco-it.exec</include>
+                  </includes>
+                </fileSet>
+              </fileSets>
+              <destFile>${project.build.directory}/jacoco.exec</destFile>
+            </configuration>
           </execution>
           <execution>
             <id>report</id>
-            <phase>test</phase>
+            <phase>verify</phase>
             <goals><goal>report</goal></goals>
+            <configuration>
+              <dataFile>${project.build.directory}/jacoco.exec</dataFile>
+            </configuration>
           </execution>
           <execution>
             <id>check</id>
             <phase>verify</phase>
             <goals><goal>check</goal></goals>
             <configuration>
+              <dataFile>${project.build.directory}/jacoco.exec</dataFile>
               <rules>
                 <rule>
                   <element>BUNDLE</element>
@@ -166,7 +201,6 @@
               </rules>
               <excludes>
                 <exclude>com/flightplan/FlightPlanApplication.class</exclude>
-                <exclude>com/flightplan/service/LiveDataFetchStrategy.class</exclude>
               </excludes>
             </configuration>
           </execution>

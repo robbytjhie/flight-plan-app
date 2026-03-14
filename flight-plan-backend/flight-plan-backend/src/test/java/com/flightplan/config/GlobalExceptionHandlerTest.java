@@ -207,7 +207,7 @@ class GlobalExceptionHandlerTest {
         @DisplayName("IM8 S6: 500 response body contains NO internal exception detail")
         void internalErrorHidesExceptionDetail() throws Exception {
             when(flightService.getAllFlightPlans())
-                    .thenThrow(new RuntimeException("secret DB password = hunter2"));
+                    .thenThrow(new RuntimeException("sensitive-internal-detail"));
 
             mockMvc.perform(get("/api/flights"))
                     .andExpect(status().isInternalServerError())
