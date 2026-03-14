@@ -67,7 +67,7 @@ jobs:
       # ── JaCoCo coverage enforcement (≥90% line, ≥85% branch) ─────────────
       - name: JaCoCo coverage report & enforcement
         run: |
-          mmvn -B verify -DskipITs \
+          mvn -B verify -DskipITs \
             -Djacoco.line.minimum=0.90 \
             -Djacoco.branch.minimum=0.85
 
