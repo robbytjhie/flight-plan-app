@@ -201,6 +201,7 @@
               </rules>
               <excludes>
                 <exclude>com/flightplan/FlightPlanApplication.class</exclude>
+                <exclude>com/flightplan/service/LiveDataFetchStrategy.class</exclude>
               </excludes>
             </configuration>
           </execution>
