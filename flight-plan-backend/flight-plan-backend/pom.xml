@@ -212,7 +212,7 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
-          <argLine>${argLine}</argLine>
+          <argLine>@{argLine}</argLine>
           <includes>
             <include>**/*Test.java</include>
             <include>**/*Tests.java</include>
@@ -231,7 +231,7 @@
           <includes>
             <include>**/*IT.java</include>
           </includes>
-          <argLine>${argLine}</argLine>
+          <argLine>@{argLine}</argLine>
         </configuration>
         <executions>
           <execution>
