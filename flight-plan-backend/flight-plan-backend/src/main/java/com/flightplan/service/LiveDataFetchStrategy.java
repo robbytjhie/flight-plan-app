@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -76,24 +77,23 @@ public class LiveDataFetchStrategy implements DataFetchStrategy {
     private List<GeoPoint> fetchGeoPoints(String path, String type) {
         log.info("[FETCH][prod] GET {}", path);
 
-        List<String> raw = flightApiWebClient.get()
+        String[] rawArray = flightApiWebClient.get()
                 .uri(path)
                 .retrieve()
-                .bodyToFlux(String.class)
-                .collectList()
+                .bodyToMono(String[].class)
                 .onErrorResume(e -> {
                     log.error("[FETCH][prod] Geopoints call failed for {} — returning empty list. Error: {}",
                             path, e.getMessage());
-                    return Mono.just(Collections.emptyList());
+                    return Mono.just(new String[0]);
                 })
                 .block();
 
-        if (raw == null || raw.isEmpty()) {
+        if (rawArray == null || rawArray.length == 0) {
             log.warn("[FETCH][prod] Empty response from {}", path);
             return Collections.emptyList();
         }
 
-        List<GeoPoint> parsed = raw.stream()
+        List<GeoPoint> parsed = Arrays.stream(rawArray)
                 .map(s -> GeoPoint.parse(s, type))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
