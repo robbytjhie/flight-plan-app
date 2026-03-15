@@ -89,6 +89,7 @@ jobs:
               -Dsonar.token="${SONAR_TOKEN}" \
               -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
               -Dsonar.qualitygate.wait=false \
+              -Dsonar.branch.name=main \
               -Dsonar.qualitygate.timeout=300 && break
             echo "Attempt $i failed, waiting 30s before retry..."
             sleep 30
