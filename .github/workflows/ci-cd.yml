@@ -9,10 +9,10 @@ name: CI/CD — Build, Test, Quality Gate & Deploy
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, develop-refactoring, 'feature/**' ]
     tags:     [ 'v*.*.*' ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, develop, develop-refactoring ]
 
 env:
   JAVA_VERSION:      '17'
