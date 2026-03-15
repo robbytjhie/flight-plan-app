@@ -197,7 +197,19 @@ jobs:
       - name: Build backend image (local, scan only)
         run: docker build -t flightplan-backend:scan ./flight-plan-backend/flight-plan-backend
 
-      - name: Scan backend image
+      # ── Step 1: Human-readable table printed to the job log ─────────────
+      # Read findings here in the Actions log before the pipeline fails.
+      # exit-code: '0' so this never blocks — SARIF step below is the gate.
+      - name: Scan backend image (table — human readable)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: flightplan-backend:scan
+          format:    table
+          severity:  HIGH,CRITICAL
+          exit-code: '0'
+
+      # ── Step 2: SARIF upload + pipeline gate ─────────────────────────────
+      - name: Scan backend image (SARIF — pipeline gate)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: flightplan-backend:scan
