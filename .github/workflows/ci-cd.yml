@@ -90,6 +90,9 @@ jobs:
             -Dsonar.qualitygate.timeout=300
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          SONAR_ORG: ${{ secrets.SONAR_ORG }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
       # ── Build fat JAR ─────────────────────────────────────────────────────
       - name: Package JAR
