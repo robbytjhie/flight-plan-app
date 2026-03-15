@@ -16,6 +16,7 @@ FROM eclipse-temurin:17-jre-alpine AS runtime
 
 # IM8 S3: run as non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN apk upgrade --no-cache
 USER appuser
 
 WORKDIR /app
