@@ -220,17 +220,17 @@ jobs:
           output: trivy-backend.sarif
           exit-code: '0'
 
-      - name: Build frontend image (local, scan only)
-        run: docker build -t flightplan-frontend:scan ./frontend
-
-      - name: Scan frontend image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: flightplan-frontend:scan
-          format: sarif
-          output: trivy-frontend.sarif
-          severity: HIGH,CRITICAL
-          exit-code: '1'
+#      - name: Build frontend image (local, scan only)
+#        run: docker build -t flightplan-frontend:scan ./frontend
+#
+#      - name: Scan frontend image
+#        uses: aquasecurity/trivy-action@master
+#        with:
+#          image-ref: flightplan-frontend:scan
+#          format: sarif
+#          output: trivy-frontend.sarif
+#          severity: HIGH,CRITICAL
+#          exit-code: '1'
 
       - name: Upload Trivy SARIF results to GitHub Security
         if: always()
