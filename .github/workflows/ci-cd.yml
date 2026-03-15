@@ -32,7 +32,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: flight-plan-backend/flight-plan-backend
+        working-directory: .
 
     # ── ADDED: expose version output so other jobs can use same version ──────
     outputs:
@@ -87,7 +87,7 @@ jobs:
         if: always()
         with:
           name: jacoco-report
-          path: flight-plan-backend/flight-plan-backend/target/site/jacoco/
+          path: target/site/jacoco/
           retention-days: 14
 
       # ── SonarCloud quality gate ───────────────────────────────────────────
@@ -135,7 +135,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-jar
-          path: flight-plan-backend/flight-plan-backend/target/*.jar
+          path: target/*.jar
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -192,10 +192,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: backend-jar
-          path: flight-plan-backend/flight-plan-backend/target/
+          path: target/
 
       - name: Build backend image (local, scan only)
-        run: docker build -t flightplan-backend:scan ./flight-plan-backend/flight-plan-backend
+        run: docker build -t flightplan-backend:scan .
 
       # ── Step 1: Human-readable table printed to the job log ─────────────
       # Read findings here in the Actions log before the pipeline fails.
@@ -272,7 +272,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: backend-jar
-          path: flight-plan-backend/flight-plan-backend/target/
+          path: target/
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -301,7 +301,7 @@ jobs:
       - name: Build & push backend
         uses: docker/build-push-action@v5
         with:
-          context:    ./flight-plan-backend/flight-plan-backend
+          context:    .
           push:       true
           tags:       ${{ steps.meta-backend.outputs.tags }}
           labels:     ${{ steps.meta-backend.outputs.labels }}
