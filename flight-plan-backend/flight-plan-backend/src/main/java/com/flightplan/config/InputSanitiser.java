@@ -32,6 +32,7 @@ public class InputSanitiser {
 
     private static final int MAX_CALLSIGN_LENGTH = 8;
     private static final int MAX_QUERY_LENGTH = 100;
+    private static final int MAX_QUERY_LENGTH_v1 = 100;
 
     /**
      * Validate and normalise a flight callsign path variable.
