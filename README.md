@@ -286,7 +286,7 @@ Every push runs a SonarCloud quality gate. The build **blocks** if any of these 
 | Maintainability / Reliability / Security rating | A |
 | Blocker or Critical issues | 0 |
 
-Add the Sonar Maven plugin to `pom.xml` using the snippet at `flight-plan-backend/flight-plan-backend/scripts/sonar-plugin-snippet.xml`.
+Add the Sonar Maven plugin to `pom.xml` using the snippet at `scripts/sonar-plugin-snippet.xml`.
 
 ### GitHub Secrets — Full List
 
