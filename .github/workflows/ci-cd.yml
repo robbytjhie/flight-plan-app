@@ -34,6 +34,10 @@ jobs:
       run:
         working-directory: flight-plan-backend/flight-plan-backend
 
+    # ── ADDED: expose version output so other jobs can use same version ──────
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +50,22 @@ jobs:
           distribution: temurin
           cache: maven
 
+      # ── ADDED: Determine version based on branch/tag ─────────────────────
+      # develop → 1.0.X-SNAPSHOT   main or tag → 1.0.X
+      # X = github.run_number which auto-increments on every pipeline run
+      - name: Set version
+        id: version
+        run: |
+          BUILD_NUMBER=${{ github.run_number }}
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+             [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="1.0.${BUILD_NUMBER}"
+          else
+            VERSION="1.0.${BUILD_NUMBER}-SNAPSHOT"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+
       # ── Tests + JaCoCo coverage (single mvn verify pass) ────────────────────
       # WHY ONE STEP: separate mvn invocations each overwrite target/jacoco.exec.
       # A second pass without -Dspring.profiles.active=dev causes @Profile('dev')
@@ -54,6 +74,7 @@ jobs:
       - name: Test, report & enforce coverage
         run: |
           mvn -B verify \
+            -Drevision=${{ steps.version.outputs.version }} \
             -Dspring.profiles.active=dev \
             -Dsecurity.cors.allowed-origins=http://localhost:3000 \
             -Djacoco.line.minimum=0.90 \
@@ -83,6 +104,7 @@ jobs:
           for i in 1 2 3; do
             echo "Attempt $i..."
             mvn -B sonar:sonar \
+              -Drevision=${{ steps.version.outputs.version }} \
               -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
               -Dsonar.organization="${SONAR_ORG}" \
               -Dsonar.host.url=https://sonarcloud.io \
@@ -101,8 +123,13 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
       # ── Build fat JAR ─────────────────────────────────────────────────────
+      # ── ADDED: -Drevision= so JAR filename includes version ──────────────
+      # develop → flight-plan-backend-1.0.42-SNAPSHOT.jar
+      # main    → flight-plan-backend-1.0.42.jar
       - name: Package JAR
-        run: mvn -B package -DskipTests
+        run: |
+          mvn -B package -DskipTests \
+            -Drevision=${{ steps.version.outputs.version }}
 
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
@@ -203,7 +230,8 @@ jobs:
   build-push-images:
     name: 🐳 Build & Push Images → GHCR
     runs-on: ubuntu-latest
-    needs: [ scan-images ]
+    # ── ADDED: test-backend added to needs so version output is available ───
+    needs: [ scan-images, test-backend ]
     if: |
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' ||
@@ -251,6 +279,9 @@ jobs:
             type=ref,event=branch,prefix={{branch}}-,suffix=-{{sha}}
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            # ── ADDED: versioned tag matching JAR version ─────────────────
+            # develop → 1.0.42-SNAPSHOT   main → 1.0.42
+            type=raw,value=${{ needs.test-backend.outputs.version }}
 
       - name: Build & push backend
         uses: docker/build-push-action@v5
@@ -272,6 +303,9 @@ jobs:
             type=ref,event=branch,prefix={{branch}}-,suffix=-{{sha}}
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            # ── ADDED: versioned tag matching JAR version ─────────────────
+            # develop → 1.0.42-SNAPSHOT   main → 1.0.42
+            type=raw,value=${{ needs.test-backend.outputs.version }}
 
       - name: Build & push frontend
         uses: docker/build-push-action@v5

@@ -13,11 +13,14 @@
 
   <groupId>com.flightplan</groupId>
   <artifactId>flight-plan-backend</artifactId>
-  <version>1.0.0</version>
+  <version>${revision}</version>
   <name>flight-plan-backend</name>
   <description>Flight Plan API Backend</description>
 
   <properties>
+    <!-- ── Version (overridden by CI via -Drevision=...) ────────────────── -->
+    <!-- develop → 1.0.X-SNAPSHOT   main/tag → 1.0.X                        -->
+    <revision>1.0.0-SNAPSHOT</revision>
     <java.version>17</java.version>
     <wiremock.version>3.3.1</wiremock.version>
     <jacoco.version>0.8.11</jacoco.version>
