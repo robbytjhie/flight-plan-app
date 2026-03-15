@@ -74,9 +74,12 @@ jobs:
       # 0 unreviewed security hotspots.
       - name: SonarCloud analysis
         run: |
-	        echo "Project key length: ${#SONAR_PROJECT_KEY}"
-	        echo "Org length: ${#SONAR_ORG}"
-	        echo "Token length: ${#SONAR_TOKEN}"
+           echo "SONAR_PROJECT_KEY length: ${#SONAR_PROJECT_KEY}"
+           echo "SONAR_PROJECT_KEY starts with: ${SONAR_PROJECT_KEY:0:5}***"
+           echo "SONAR_ORG length: ${#SONAR_ORG}"
+           echo "SONAR_ORG starts with: ${SONAR_ORG:0:5}***"
+           echo "SONAR_TOKEN length: ${#SONAR_TOKEN}"
+           echo "SONAR_TOKEN is empty: $([[ -z $SONAR_TOKEN ]] && echo YES || echo NO)"
           mvn -B sonar:sonar \
             -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }} \
             -Dsonar.organization=${{ secrets.SONAR_ORG }} \
