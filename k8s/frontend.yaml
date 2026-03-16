@@ -22,6 +22,8 @@ spec:
     spec:
       # IM8 S1: do not mount service-account token
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: frontend
           image: ghcr.io/${GITHUB_REPOSITORY_OWNER}/flightplan-frontend:latest
