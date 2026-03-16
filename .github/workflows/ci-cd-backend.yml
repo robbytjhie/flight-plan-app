@@ -323,6 +323,27 @@ jobs:
           kubectl apply --dry-run=client -f k8s/ingress.yaml
           kubectl apply --dry-run=client -f k8s/hpa.yaml
 
+      # Verify flightplan-secrets exists in the namespace BEFORE applying
+      # manifests. Both redis.yaml and backend.yaml reference this secret — if it
+      # is missing, pods crash on startup and the rollout times out with a cryptic
+      # "exceeded progress deadline" error instead of a clear message.
+      - name: Pre-flight — verify flightplan-secrets exists
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          if ! kubectl get secret flightplan-secrets -n flightplan &>/dev/null; then
+            echo "❌ ERROR: Secret 'flightplan-secrets' not found in namespace 'flightplan'."
+            echo ""
+            echo "Run this once to create it:"
+            echo "  kubectl create secret generic flightplan-secrets \\"
+            echo "    --from-literal=FLIGHT_API_KEY=<real-key> \\"
+            echo "    --from-literal=FLIGHT_API_BASE_URL=https://api.swimapisg.info \\"
+            echo "    --from-literal=REDIS_PASSWORD=<strong-password> \\"
+            echo "    --from-literal=CORS_ALLOWED_ORIGINS=https://<your-frontend-domain> \\"
+            echo "    -n flightplan"
+            exit 1
+          fi
+          echo "✅ flightplan-secrets found — proceeding with deployment."
+
       # IM8: do NOT apply secret.yaml in CI — secrets must be pre-provisioned
       # in the cluster via external secrets operator or manual kubectl create.
       - name: Apply Kubernetes manifests (no secrets)
@@ -334,10 +355,14 @@ jobs:
           kubectl apply -f k8s/hpa.yaml
 
       - name: Pin images to this SHA
+        # Use the actual image tag output from build-push-images job.
+        # Previously hardcoded ':main-sha-${SHA}' which only matched images built
+        # from the main branch. On develop-refactoring the pushed tag is the
+        # versioned tag (e.g. 1.0.42-SNAPSHOT) — use that directly.
         run: |
-          SHA=${{ needs.build-push-images.outputs.short-sha }}
+          IMAGE_TAG=${{ needs.build-push-images.outputs.backend-tag }}
           kubectl set image deployment/flightplan-backend \
-            backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:main-sha-${SHA} \
+            backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${IMAGE_TAG} \
             -n flightplan
 
       - name: Wait for rollout
