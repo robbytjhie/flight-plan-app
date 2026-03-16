@@ -315,6 +315,12 @@ jobs:
             (echo "❌ KUBE_CONFIG secret is missing or not valid base64" && exit 1)
           chmod 600 ~/.kube/config
 
+      - name: Debug — show cluster context
+        run: |
+          kubectl config current-context
+          kubectl cluster-info
+          kubectl get namespaces
+
       - name: Dry-run validate manifests
         run: |
           kubectl apply --dry-run=client -f k8s/namespace.yaml
