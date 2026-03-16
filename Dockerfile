@@ -9,7 +9,7 @@ FROM eclipse-temurin:17-jre-alpine AS extractor
 WORKDIR /app
 # The fat JAR is built by CI before docker build runs
 COPY target/flight-plan-backend-*.jar app.jar
-RUN java -Djarmode=layertools -jar app.jar extract
+RUN java -Djarmode=tools -jar app.jar extract --layers --launcher
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM eclipse-temurin:17-jre-alpine AS runtime
@@ -42,4 +42,4 @@ ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOut
   -XX:InitialRAMPercentage=50.0 -Djava.security.egd=file:/dev/./urandom \
   -Dserver.error.include-message=never -Duser.timezone=Asia/Singapore"
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.JarLauncher"]
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.launch.JarLauncher"]
