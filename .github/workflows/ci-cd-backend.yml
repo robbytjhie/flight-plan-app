@@ -171,6 +171,7 @@ jobs:
           image-ref: flightplan-backend:scan
           format:    table
           severity:  HIGH,CRITICAL
+          list-all-pkgs: true
           exit-code: '0'
 
       # ── Step 2: SARIF upload → GitHub Security tab ──────────────────────
