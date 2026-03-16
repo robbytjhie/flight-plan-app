@@ -21,11 +21,8 @@ USER appuser
 
 WORKDIR /app
 
-# Copy Spring Boot layers in cache-friendly order (least → most volatile)
-COPY --from=extractor /app/dependencies/          ./
-COPY --from=extractor /app/spring-boot-loader/    ./
-COPY --from=extractor /app/snapshot-dependencies/ ./
-COPY --from=extractor /app/application/           ./
+# Copy the original JAR directly — most reliable approach
+COPY --from=extractor /app/app.jar ./app.jar
 
 # Expose app port (mapped in docker-compose, ECS task definition, and k8s)
 EXPOSE 8080
