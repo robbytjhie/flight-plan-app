@@ -22,9 +22,9 @@ USER appuser
 WORKDIR /app
 
 # Copy Spring Boot layers in cache-friendly order (least → most volatile)
-#COPY --from=extractor /app/dependencies/          ./
-#COPY --from=extractor /app/spring-boot-loader/    ./
-#COPY --from=extractor /app/snapshot-dependencies/ ./
+COPY --from=extractor /app/dependencies/          ./
+COPY --from=extractor /app/spring-boot-loader/    ./
+COPY --from=extractor /app/snapshot-dependencies/ ./
 #COPY --from=extractor /app/application/           ./
 
 # ✅ Fat JAR — Trivy sees all BOOT-INF/lib/ individually (90+ JARs)
