@@ -30,9 +30,6 @@ WORKDIR /app
 # ✅ Fat JAR — Trivy sees all BOOT-INF/lib/ individually (90+ JARs)
 COPY --from=extractor /app/app.jar ./app.jar
 
-# ✅ -jar flag — works with ALL Spring Boot versions, no JarLauncher class issues
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
-
 # Expose app port (mapped in docker-compose, ECS task definition, and k8s)
 EXPOSE 8080
 
@@ -48,4 +45,5 @@ ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOut
   -XX:InitialRAMPercentage=50.0 -Djava.security.egd=file:/dev/./urandom \
   -Dserver.error.include-message=never -Duser.timezone=Asia/Singapore"
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.launch.JarLauncher"]
+# ✅ -jar flag — works with ALL Spring Boot versions, no JarLauncher class issues
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
