@@ -371,6 +371,22 @@ jobs:
             backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${IMAGE_TAG} \
             -n flightplan
 
+      - name: Set Spring profile
+        # develop-refactoring + main + tags → prod (real API)
+        # feature/** + develop               → dev  (mock data)
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/develop-refactoring" ]] || \
+             [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+             [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            SPRING_PROFILE="prod"
+          else
+            SPRING_PROFILE="dev"
+          fi
+          echo "Setting SPRING_PROFILES_ACTIVE=${SPRING_PROFILE}"
+          kubectl set env deployment/flightplan-backend \
+            SPRING_PROFILES_ACTIVE=${SPRING_PROFILE} \
+            -n flightplan
+
       - name: Wait for rollout
         run: |
           kubectl rollout status deployment/flightplan-backend  -n flightplan --timeout=120s
