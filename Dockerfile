@@ -21,8 +21,11 @@ USER appuser
 
 WORKDIR /app
 
-# Copy the original JAR directly — most reliable approach
+# ✅ Fat JAR — Trivy sees all BOOT-INF/lib/ individually (90+ JARs)
 COPY --from=extractor /app/app.jar ./app.jar
+
+# ✅ -jar flag — works with ALL Spring Boot versions, no JarLauncher class issues
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
 
 # Expose app port (mapped in docker-compose, ECS task definition, and k8s)
 EXPOSE 8080
