@@ -74,13 +74,24 @@ public class LiveDataFetchStrategy implements DataFetchStrategy {
         return fetchGeoPoints(PATH_FIXES, "fix");
     }
 
+    @Autowired
+    private ObjectMapper objectMapper;
+
     private List<GeoPoint> fetchGeoPoints(String path, String type) {
         log.info("[FETCH][prod] GET {}", path);
 
         String[] rawArray = flightApiWebClient.get()
                 .uri(path)
                 .retrieve()
-                .bodyToMono(String[].class)
+                .bodyToMono(String.class)
+                .map(raw -> {
+                    try {
+                        return objectMapper.readValue(raw, String[].class);
+                    } catch (Exception e) {
+                        log.error("[FETCH][prod] Failed to parse airways response: {}", e.getMessage());
+                        return new String[0];
+                    }
+                })
                 .onErrorResume(e -> {
                     log.error("[FETCH][prod] Geopoints call failed for {} — returning empty list. Error: {}",
                             path, e.getMessage());
