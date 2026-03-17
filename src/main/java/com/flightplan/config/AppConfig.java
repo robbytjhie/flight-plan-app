@@ -76,6 +76,9 @@ public class AppConfig {
                 .defaultHeader("apikey", apiKey) // IM8 S5: value from K8s Secret
                 .filter(logRequest())
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .codecs(configurer -> configurer
+                        .defaultCodecs()
+                        .maxInMemorySize(10 * 1024 * 1024)) // 10MB
                 .build();
     }
 
