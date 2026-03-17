@@ -24,10 +24,12 @@ USER appuser
 WORKDIR /app
 
 # Copy Spring Boot layers in cache-friendly order (least → most volatile)
-COPY --from=extractor /app/dependencies/          ./
-COPY --from=extractor /app/spring-boot-loader/    ./
-COPY --from=extractor /app/snapshot-dependencies/ ./
-COPY --from=extractor /app/application/           ./
+#COPY --from=extractor /app/dependencies/          ./
+#COPY --from=extractor /app/spring-boot-loader/    ./
+#COPY --from=extractor /app/snapshot-dependencies/ ./
+#COPY --from=extractor /app/application/           ./
+# ✅ Fat JAR — Trivy sees all BOOT-INF/lib/ individually (90+ JARs)
+COPY --from=extractor /app/app.jar ./app.jar
 
 # Expose app port (mapped in docker-compose, ECS task definition, and k8s)
 EXPOSE 8080
@@ -44,5 +46,5 @@ ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOut
   -XX:InitialRAMPercentage=50.0 -Djava.security.egd=file:/dev/./urandom \
   -Dserver.error.include-message=never -Duser.timezone=Asia/Singapore"
 
-# Layered layout entrypoint (supports Trivy per-JAR targets under BOOT-INF/lib)
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.launch.JarLauncher"]
+# ✅ -jar flag — works with ALL Spring Boot versions, no JarLauncher class issues
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
