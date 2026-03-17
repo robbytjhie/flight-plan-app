@@ -162,22 +162,44 @@ public class FlightService {
         List<double[]> primaryLine = primary.getPolyline();
         if (primaryLine == null || primaryLine.size() < 2) return Optional.of(primary);
 
-        double magnitude = 0.6 + (Math.abs(Objects.hashCode(callsign)) % 60) / 100.0; // 0.6..1.19 deg
+        // Deterministic per-callsign variation so ALT route is stable across refreshes.
+        double baseOffsetDeg = 1.8 + (Math.abs(Objects.hashCode(callsign)) % 70) / 20.0; // ~1.8..5.25 deg
         double sign = (Math.abs(Objects.hashCode(callsign + ":alt")) % 2 == 0) ? 1.0 : -1.0;
 
         List<double[]> altLine = new ArrayList<>(primaryLine.size());
         for (int i = 0; i < primaryLine.size(); i++) {
             double[] p = primaryLine.get(i);
             if (p == null || p.length < 2) continue;
+
             double lat = p[0];
             double lon = p[1];
 
-            // Keep endpoints identical; nudge intermediate points.
+            // Keep endpoints identical; offset intermediate points perpendicular to the local path.
             if (i > 0 && i < primaryLine.size() - 1) {
-                double f = Math.sin(i * 1.7) * magnitude * sign;
-                lat = clampLat(lat + (f * 0.25));
-                lon = wrapLon(lon + (f * 0.35));
+                double[] prev = primaryLine.get(i - 1);
+                double[] next = primaryLine.get(i + 1);
+                if (prev != null && next != null && prev.length >= 2 && next.length >= 2) {
+                    double dLat = next[0] - prev[0];
+                    double dLon = normaliseLonDelta(next[1] - prev[1]);
+
+                    // Perpendicular vector in lat/lon space: (-dLon, dLat)
+                    double pLat = -dLon;
+                    double pLon = dLat;
+                    double norm = Math.sqrt(pLat * pLat + pLon * pLon);
+
+                    // Scale offset by segment "size" so short segments aren't wildly displaced.
+                    double seg = Math.sqrt(dLat * dLat + dLon * dLon);
+                    double scale = Math.max(0.25, Math.min(1.0, seg / 15.0)); // 0.25..1.0
+                    double wave = 0.55 + 0.45 * Math.sin(i * 1.3);            // 0.10..1.0-ish
+                    double offset = baseOffsetDeg * scale * wave * sign;
+
+                    if (norm > 1e-9) {
+                        lat = clampLat(lat + (pLat / norm) * offset);
+                        lon = wrapLon(lon + (pLon / norm) * offset);
+                    }
+                }
             }
+
             altLine.add(new double[]{lat, lon});
         }
 
@@ -213,6 +235,13 @@ public class FlightService {
 
     private double wrapLon(double lon) {
         double x = lon;
+        while (x > 180.0) x -= 360.0;
+        while (x < -180.0) x += 360.0;
+        return x;
+    }
+
+    private double normaliseLonDelta(double dLon) {
+        double x = dLon;
         while (x > 180.0) x -= 360.0;
         while (x < -180.0) x += 360.0;
         return x;
