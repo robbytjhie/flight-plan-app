@@ -20,7 +20,7 @@ import java.util.List;
  * Inactive when: spring.profiles.active=prod
  */
 @Service
-@Profile("dev")
+@Profile("mock")
 @Slf4j
 @RequiredArgsConstructor
 public class MockDataFetchStrategy implements DataFetchStrategy {

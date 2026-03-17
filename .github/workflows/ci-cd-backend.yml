@@ -376,9 +376,10 @@ jobs:
         # develop-refactoring + main + tags → prod (real API)
         # feature/** + develop               → dev  (mock data)
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/develop-refactoring" ]] || \
-             [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
-             [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "${{ github.ref }}" == refs/heads/mock/* ]]; then
+            SPRING_PROFILE="mock"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+               [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             SPRING_PROFILE="prod"
           else
             SPRING_PROFILE="dev"

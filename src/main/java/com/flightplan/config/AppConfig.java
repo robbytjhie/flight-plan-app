@@ -52,7 +52,7 @@ public class AppConfig {
      *           key: api-key
      */
     @Bean
-    @Profile("prod")
+    @Profile({"dev", "prod"})
     public WebClient flightApiWebClient(
             @Value("${flight.api.base-url}") String baseUrl,
             @Value("${flight.api.key}")      String apiKey) throws Exception {

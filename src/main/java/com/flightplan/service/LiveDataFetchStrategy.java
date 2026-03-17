@@ -39,7 +39,7 @@ import java.util.stream.Collectors;
  * configured in {@link com.flightplan.config.AppConfig}.
  */
 @Service
-@Profile("prod")
+@Profile({"dev", "prod"})
 @Slf4j
 @RequiredArgsConstructor
 public class LiveDataFetchStrategy implements DataFetchStrategy {
