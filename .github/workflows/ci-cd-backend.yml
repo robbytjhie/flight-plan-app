@@ -318,15 +318,16 @@ jobs:
           mkdir -p ~/.kube
           # main → prod cluster, everything else → staging cluster
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config || \
-              (echo "❌ KUBE_CONFIG_PROD secret is missing or not valid base64" && exit 1)
-            echo "✅ Using prod cluster (flightplan-prod)"
+            SECRET="${{ secrets.KUBE_CONFIG_PROD || secrets.KUBE_CONFIG }}"
+            CLUSTER="flightplan-prod"
           else
-            echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > ~/.kube/config || \
-              (echo "❌ KUBE_CONFIG_STAGING secret is missing or not valid base64" && exit 1)
-            echo "✅ Using staging cluster (flightplan-staging)"
+            SECRET="${{ secrets.KUBE_CONFIG_STAGING || secrets.KUBE_CONFIG }}"
+            CLUSTER="flightplan-staging"
           fi
-          chmod 600 ~/.kube/config
+            echo "${SECRET}" | base64 -d > ~/.kube/config || \
+              (echo "❌ kubeconfig secret is missing or not valid base64" && exit 1)
+            chmod 600 ~/.kube/config
+            echo "✅ Using cluster: ${CLUSTER}"
 
       - name: Debug — show cluster context
         run: |
