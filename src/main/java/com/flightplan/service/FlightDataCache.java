@@ -46,9 +46,9 @@ import java.util.concurrent.locks.Lock;
  * ──────────────────────────────────────────────────────────────────────────
  * NOTE ON CACHE CONSISTENCY
  * ──────────────────────────────────────────────────────────────────────────
- * This uses per-pod in-memory caches. Non-leader pods serve slightly stale
- * data until they become leader on a future tick. This is acceptable for
- * flight plan data (refreshed every 60 s), but if strong consistency is
+     * This uses per-pod in-memory caches. Non-leader pods serve slightly stale
+     * data until they become leader on a future tick. This is acceptable for
+     * flight plan data (refreshed periodically), but if strong consistency is
  * required, replace the AtomicReference cache with a shared Redis cache
  * populated by the leader and read by all pods.
  *
@@ -93,13 +93,13 @@ public class FlightDataCache {
     // ── Scheduled leader-elected refresh ────────────────────────────────
 
     /**
-     * Runs every 60 seconds on all pods.
+     * Runs on a fixed interval (default 10 minutes) on all pods.
      * Only the pod that wins the Redis lock actually fetches data.
      *
      * initialDelay = 5 s: slight delay on startup to let the application
      * fully initialise before the first fetch attempt.
      */
-    @Scheduled(fixedRateString = "${cache.refresh.rate-ms:60000}",
+    @Scheduled(fixedRateString = "${cache.refresh.rate-ms:600000}",
                initialDelayString = "${cache.refresh.initial-delay-ms:5000}")
     public void refreshIfLeader() {
         Lock lock = flightDataLockRegistry.obtain(LeaderElectionConfig.FLIGHT_DATA_FETCH_LOCK);

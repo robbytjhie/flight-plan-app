@@ -35,7 +35,8 @@ security:
 # ── Cache / scheduler ────────────────────────────────────────────────────────
 cache:
   refresh:
-    rate-ms: ${CACHE_REFRESH_RATE_MS:60000}
+    # Default: 10 minutes (600000 ms). Override via CACHE_REFRESH_RATE_MS if needed.
+    rate-ms: ${CACHE_REFRESH_RATE_MS:600000}
     initial-delay-ms: ${CACHE_REFRESH_INITIAL_DELAY_MS:5000}
 
 # ── Actuator ─────────────────────────────────────────────────────────────────
