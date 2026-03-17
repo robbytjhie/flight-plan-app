@@ -271,6 +271,22 @@ GitHub Container Registry is free, integrated natively with GitHub Actions (uses
 **Why mock-first approach?**
 The real API uses placeholder URLs in the spec. The mock service mirrors the exact JSON structure so the frontend and route logic can be fully developed and tested without live credentials. Swapping to live data requires only env vars — no code changes.
 
+---
+
+## AI-Assisted Development Disclosure
+
+AI-assisted tools were used to accelerate implementation and learning. All suggestions were reviewed and adapted to fit this codebase, and changes were validated by running tests/coverage gates and verifying behaviour in the deployed environment.
+
+- **Cursor (AI coding assistant in IDE)**: used for code navigation, refactoring assistance, and drafting implementation/test changes across frontend and backend.
+- **Claude**: used to understand existing logic and workflows (e.g. tracing data flow, clarifying CI/CD pipeline intent, and reasoning about issues such as duplication and coverage drops).
+- **ChatGPT & Gemini**: used for learning and quick reference on framework/tooling patterns (Spring Boot, React/Leaflet, GitHub Actions), plus brainstorming edge cases and test scenarios.
+
+**What I validated manually**
+
+- **Correctness**: checked endpoints and UI behaviour (including route selection and the alternate route toggle) via browser DevTools and direct API responses.
+- **Quality gates**: confirmed unit/integration tests pass and that JaCoCo / frontend coverage thresholds are met.
+- **Security & reliability**: ensured secrets are not hardcoded, reviewed input validation/sanitisation, and checked CI scan/report outputs for regressions.
+
 
 ---
 
