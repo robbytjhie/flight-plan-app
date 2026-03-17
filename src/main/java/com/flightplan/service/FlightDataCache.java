@@ -13,6 +13,11 @@ import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 
@@ -127,7 +132,7 @@ public class FlightDataCache {
     // ── Internal fetch ───────────────────────────────────────────────────
 
     private void fetchAndCache() {
-        List<FlightPlan> plans = flightFetchService.fetchFlightPlans();
+        List<FlightPlan> plans = dedupeFlightPlans(flightFetchService.fetchFlightPlans());
         List<GeoPoint> airways = flightFetchService.fetchAirways();
         List<GeoPoint> fixes = flightFetchService.fetchFixes();
 
@@ -138,6 +143,62 @@ public class FlightDataCache {
 
         log.info("[LEADER] Cache refreshed: {} flight plans, {} airways, {} fixes",
                 plans.size(), airways.size(), fixes.size());
+    }
+
+    /**
+     * Upstream feeds can occasionally contain multiple FlightPlan objects for the same callsign.
+     * The UI and route resolution assume one plan per callsign, so we normalise here.
+     */
+    private List<FlightPlan> dedupeFlightPlans(List<FlightPlan> raw) {
+        if (raw == null || raw.isEmpty()) return Collections.emptyList();
+
+        // Preserve upstream ordering (important for UI/tests) while deduping by callsign.
+        Map<String, FlightPlan> byCallsign = new LinkedHashMap<>();
+        for (FlightPlan fp : raw) {
+            if (fp == null) continue;
+            String callsign = fp.getAircraftIdentification();
+            if (callsign == null || callsign.isBlank()) continue;
+
+            String key = callsign.trim().toUpperCase(Locale.ROOT);
+            FlightPlan existing = byCallsign.get(key);
+            if (existing == null) {
+                byCallsign.put(key, fp);
+                continue;
+            }
+
+            // Prefer the entry with a later lastUpdatedTimeStamp when available.
+            if (isNewer(fp.getLastUpdatedTimeStamp(), existing.getLastUpdatedTimeStamp())) {
+                byCallsign.put(key, fp);
+            }
+        }
+
+        List<FlightPlan> deduped = byCallsign.values().stream()
+                .filter(Objects::nonNull)
+                .toList();
+
+        int removed = raw.size() - deduped.size();
+        if (removed > 0) {
+            log.warn("[CACHE] Deduped flight plans: removed {} duplicates ({} -> {})",
+                    removed, raw.size(), deduped.size());
+        }
+        return deduped;
+    }
+
+    private boolean isNewer(String candidate, String current) {
+        Optional<Instant> cand = parseInstant(candidate);
+        Optional<Instant> curr = parseInstant(current);
+        if (cand.isPresent() && curr.isPresent()) return cand.get().isAfter(curr.get());
+        if (cand.isPresent() && curr.isEmpty()) return true;
+        return false;
+    }
+
+    private Optional<Instant> parseInstant(String ts) {
+        if (ts == null || ts.isBlank()) return Optional.empty();
+        try {
+            return Optional.of(Instant.parse(ts.trim()));
+        } catch (Exception ignored) {
+            return Optional.empty();
+        }
     }
 
     // ── Cache read methods (called by FlightService on every request) ────
