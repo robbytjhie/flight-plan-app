@@ -480,6 +480,87 @@ class FlightServiceTest {
                 assertThat(p[1]).isBetween(-180.0, 180.0);
             });
         }
+
+        @Test @DisplayName("normalises longitude delta across dateline (covers +/-180 wrap branches)")
+        void normalisesLonDeltaAcrossDateline() {
+            // Two cases:
+            //  1) prev=-179, next=+179  => delta=+358  -> normalise to -2 (x>180 branch)
+            //  2) prev=+179, next=-179  => delta=-358 -> normalise to +2 (x<-180 branch)
+            FlightPlan plan = datelinePlan("DLN01");
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("DEPA", 0.0, 0.0, "fix"),
+                    new GeoPoint("DSTA", 1.0, 1.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            FlightRoute primary = service.resolveRoute("DLN01").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("DLN01").orElseThrow();
+
+            // Endpoints unchanged, but at least one intermediate point should differ.
+            assertThat(alt.getPolyline().get(0)).containsExactly(primary.getPolyline().get(0));
+            assertThat(alt.getPolyline().get(primary.getPolyline().size() - 1))
+                    .containsExactly(primary.getPolyline().get(primary.getPolyline().size() - 1));
+
+            boolean anyDifferent = false;
+            for (int i = 1; i < primary.getPolyline().size() - 1; i++) {
+                double[] p = primary.getPolyline().get(i);
+                double[] a = alt.getPolyline().get(i);
+                if (p[0] != a[0] || p[1] != a[1]) { anyDifferent = true; break; }
+            }
+            assertThat(anyDifferent).isTrue();
+        }
+
+        @Test @DisplayName("handles degenerate local path where prev==next (covers norm<=1e-9 branch)")
+        void handlesDegeneratePrevNextSame() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("deg-001");
+            plan.setAircraftIdentification("DEG01");
+            plan.setMessageType("FPL");
+            plan.setFlightType("M");
+
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("DEPA");
+            plan.setDeparture(dep);
+
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("DSTA");
+            plan.setArrival(arr);
+
+            // Route: three identical intermediate points so prev==next around the middle.
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            List<FlightPlan.RouteElement> els = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+                el.setSeqNum(i + 1);
+                FlightPlan.Position pos = new FlightPlan.Position();
+                pos.setDesignatedPoint("MIDP");
+                pos.setLat(10.0);
+                pos.setLon(20.0);
+                el.setPosition(pos);
+                el.setAirway("DCT");
+                els.add(el);
+            }
+            fr.setRouteElement(els);
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("DEPA", 0.0, 0.0, "fix"),
+                    new GeoPoint("DSTA", 1.0, 1.0, "fix"),
+                    new GeoPoint("MIDP", 10.0, 20.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            FlightRoute primary = service.resolveRoute("DEG01").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("DEG01").orElseThrow();
+
+            // Should not throw; endpoints must match.
+            assertThat(alt.getPolyline().get(0)).containsExactly(primary.getPolyline().get(0));
+            assertThat(alt.getPolyline().get(primary.getPolyline().size() - 1))
+                    .containsExactly(primary.getPolyline().get(primary.getPolyline().size() - 1));
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
@@ -559,6 +640,64 @@ class FlightServiceTest {
         mid.setPosition(pos);
         mid.setAirway("DCT");
         route.setRouteElement(new ArrayList<>(List.of(mid)));
+        fp.setFiledRoute(route);
+        return fp;
+    }
+
+    private FlightPlan datelinePlan(String callsign) {
+        FlightPlan fp = new FlightPlan();
+        fp.setId("dateline-001");
+        fp.setAircraftIdentification(callsign);
+        fp.setMessageType("FPL");
+        fp.setFlightType("M");
+
+        FlightPlan.Departure dep = new FlightPlan.Departure();
+        dep.setDepartureAerodrome("DEPA");
+        fp.setDeparture(dep);
+
+        FlightPlan.Arrival arr = new FlightPlan.Arrival();
+        arr.setDestinationAerodrome("DSTA");
+        fp.setArrival(arr);
+
+        FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+        // 5 intermediate points to allow the prev/next delta checks to exercise both wrap directions.
+        FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+        e1.setSeqNum(1);
+        FlightPlan.Position p1 = new FlightPlan.Position();
+        p1.setDesignatedPoint("P1");
+        p1.setLat(5.0);
+        p1.setLon(-179.0);
+        e1.setPosition(p1);
+        e1.setAirway("DCT");
+
+        FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+        e2.setSeqNum(2);
+        FlightPlan.Position p2 = new FlightPlan.Position();
+        p2.setDesignatedPoint("P2");
+        p2.setLat(6.0);
+        p2.setLon(179.0);
+        e2.setPosition(p2);
+        e2.setAirway("DCT");
+
+        FlightPlan.RouteElement e3 = new FlightPlan.RouteElement();
+        e3.setSeqNum(3);
+        FlightPlan.Position p3 = new FlightPlan.Position();
+        p3.setDesignatedPoint("P3");
+        p3.setLat(7.0);
+        p3.setLon(179.0);
+        e3.setPosition(p3);
+        e3.setAirway("DCT");
+
+        FlightPlan.RouteElement e4 = new FlightPlan.RouteElement();
+        e4.setSeqNum(4);
+        FlightPlan.Position p4 = new FlightPlan.Position();
+        p4.setDesignatedPoint("P4");
+        p4.setLat(8.0);
+        p4.setLon(-179.0);
+        e4.setPosition(p4);
+        e4.setAirway("DCT");
+
+        route.setRouteElement(new ArrayList<>(List.of(e1, e2, e3, e4)));
         fp.setFiledRoute(route);
         return fp;
     }
