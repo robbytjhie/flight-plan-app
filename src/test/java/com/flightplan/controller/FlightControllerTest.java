@@ -282,6 +282,34 @@ class FlightControllerTest {
         }
     }
 
+    // ── GET /api/route/{callsign}/alternate (optional extension) ───────
+
+    @Nested @DisplayName("GET /api/route/{callsign}/alternate")
+    class GetAlternateFlightRouteTests {
+
+        @Test @DisplayName("200 with alternate resolved route")
+        void returns200WithAlternateRoute() throws Exception {
+            when(flightService.resolveAlternateRoute("SIA200")).thenReturn(Optional.of(sia200Route));
+            mockMvc.perform(get("/api/route/SIA200/alternate"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.callsign").value("SIA200"))
+                    .andExpect(jsonPath("$.polyline", hasSize(2)));
+        }
+
+        @Test @DisplayName("404 when alternate route not found")
+        void returns404WhenMissing() throws Exception {
+            when(flightService.resolveAlternateRoute(anyString())).thenReturn(Optional.empty());
+            mockMvc.perform(get("/api/route/ZZZZZ/alternate"))
+                    .andExpect(status().isNotFound());
+        }
+
+        @Test @DisplayName("IM8 S6: 400 for XSS payload in alternate route path variable")
+        void rejects400ForXssInAlternateRoutePath() throws Exception {
+            mockMvc.perform(get("/api/route/<img src=x>/alternate"))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
     // ── GET /api/geopoints/airways ───────────────────────────────────
 
     @Nested @DisplayName("GET /api/geopoints/airways")

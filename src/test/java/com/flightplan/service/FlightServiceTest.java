@@ -346,6 +346,140 @@ class FlightServiceTest {
                     .getRoutePoints().stream().anyMatch(p -> "A576".equals(p.getName()));
             assertThat(hasA576).isTrue();
         }
+
+        @Test @DisplayName("inserts airway RoutePoint when route element specifies a non-DCT airway that exists in cache")
+        void insertsAirwayPointWhenAvailable() {
+            FlightPlan plan = buildSia200();
+            // Add airway name to the en-route element
+            plan.getFiledRoute().getRouteElement().get(1).setAirway("A576");
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("A576", 1.50, 104.10, "airway")
+            ));
+
+            FlightRoute r = service.resolveRoute("SIA200").orElseThrow();
+            // Expect an airway point named A576 with type "airway"
+            boolean hasAirway = r.getRoutePoints().stream()
+                    .anyMatch(p -> "A576".equals(p.getName()) && "airway".equals(p.getType()));
+            assertThat(hasAirway).isTrue();
+            // polyline and routePoints must stay aligned
+            assertThat(r.getPolyline()).hasSameSizeAs(r.getRoutePoints());
+        }
+
+        @Test @DisplayName("does not insert airway RoutePoint for DCT")
+        void doesNotInsertAirwayForDct() {
+            FlightPlan plan = buildSia200();
+            plan.getFiledRoute().getRouteElement().get(1).setAirway("DCT");
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("DCT", 0.0, 0.0, "airway")
+            ));
+
+            FlightRoute r = service.resolveRoute("SIA200").orElseThrow();
+            assertThat(r.getRoutePoints().stream().anyMatch(p -> "airway".equals(p.getType()))).isFalse();
+        }
+
+        @Test @DisplayName("does not insert airway RoutePoint when airway name is unknown")
+        void doesNotInsertAirwayWhenUnknown() {
+            FlightPlan plan = buildSia200();
+            plan.getFiledRoute().getRouteElement().get(1).setAirway("ZZ99");
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            FlightRoute r = service.resolveRoute("SIA200").orElseThrow();
+            assertThat(r.getRoutePoints().stream().anyMatch(p -> "ZZ99".equals(p.getName()))).isFalse();
+        }
+    }
+
+    // ── resolveAlternateRoute (optional extension) ──────────────────────
+
+    @Nested @DisplayName("resolveAlternateRoute()")
+    class ResolveAlternateRouteTests {
+
+        @BeforeEach
+        void stubCache() {
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(buildSia200()));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+        }
+
+        @Test @DisplayName("returns empty for unknown callsign")
+        void emptyForUnknown() {
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(buildSia200()));
+            assertThat(service.resolveAlternateRoute("XXXXXX")).isEmpty();
+        }
+
+        @Test @DisplayName("alternate route keeps endpoints but changes intermediate points")
+        void keepsEndpointsChangesIntermediate() {
+            FlightRoute primary = service.resolveRoute("SIA200").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("SIA200").orElseThrow();
+
+            assertThat(alt.getPolyline()).hasSize(primary.getPolyline().size());
+            // Endpoints unchanged
+            assertThat(alt.getPolyline().get(0)).containsExactly(primary.getPolyline().get(0));
+            assertThat(alt.getPolyline().get(primary.getPolyline().size() - 1))
+                    .containsExactly(primary.getPolyline().get(primary.getPolyline().size() - 1));
+
+            // If there are intermediate points, at least one should differ
+            if (primary.getPolyline().size() > 2) {
+                boolean anyDifferent = false;
+                for (int i = 1; i < primary.getPolyline().size() - 1; i++) {
+                    double[] p = primary.getPolyline().get(i);
+                    double[] a = alt.getPolyline().get(i);
+                    if (p[0] != a[0] || p[1] != a[1]) { anyDifferent = true; break; }
+                }
+                assertThat(anyDifferent).isTrue();
+            }
+        }
+
+        @Test @DisplayName("returns primary route unchanged when polyline has fewer than 2 points")
+        void returnsPrimaryWhenPolylineTooShort() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("alt-001");
+            plan.setAircraftIdentification("ALT1");
+            plan.setMessageType("FPL");
+            plan.setFlightType("M");
+            plan.setFiledRoute(null);
+            plan.setDeparture(null);
+            plan.setArrival(null);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of());
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            FlightRoute primary = service.resolveRoute("ALT1").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("ALT1").orElseThrow();
+
+            assertThat(primary.getPolyline()).isEmpty();
+            assertThat(alt.getPolyline()).isEmpty();
+        }
+
+        @Test @DisplayName("clamps latitude and wraps longitude for alternate polyline")
+        void clampsAndWrapsAltPolyline() {
+            FlightPlan plan = extremePlan("WRP1");
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("DEPA", 10.0, 170.0, "fix"),
+                    new GeoPoint("DSTA", -10.0, -170.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            FlightRoute alt = service.resolveAlternateRoute("WRP1").orElseThrow();
+            assertThat(alt.getPolyline().size()).isGreaterThanOrEqualTo(3);
+
+            // Only intermediate points are modified, but all points must remain in valid bounds.
+            alt.getPolyline().forEach(p -> {
+                assertThat(p[0]).isBetween(-85.0, 85.0);
+                assertThat(p[1]).isBetween(-180.0, 180.0);
+            });
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
@@ -377,6 +511,7 @@ class FlightServiceTest {
         p1.setDesignatedPoint("WSSS");
         p1.setLat(1.3644); p1.setLon(103.9915);
         e1.setPosition(p1);
+        e1.setAirway("DCT");
 
         FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
         e2.setSeqNum(2);
@@ -384,6 +519,7 @@ class FlightServiceTest {
         p2.setDesignatedPoint("PARDI");
         p2.setLat(1.10); p2.setLon(104.20);
         e2.setPosition(p2);
+        e2.setAirway("DCT");
 
         route.setRouteElement(new ArrayList<>(List.of(e1, e2)));
         fp.setFiledRoute(route);
@@ -396,5 +532,34 @@ class FlightServiceTest {
                 new GeoPoint("YSSY", -33.9461, 151.1772, "fix"),
                 new GeoPoint("PARDI", 1.10, 104.20, "fix")
         );
+    }
+
+    private FlightPlan extremePlan(String callsign) {
+        FlightPlan fp = new FlightPlan();
+        fp.setId("ext-001");
+        fp.setAircraftIdentification(callsign);
+        fp.setMessageType("FPL");
+        fp.setFlightType("M");
+
+        FlightPlan.Departure dep = new FlightPlan.Departure();
+        dep.setDepartureAerodrome("DEPA");
+        fp.setDeparture(dep);
+
+        FlightPlan.Arrival arr = new FlightPlan.Arrival();
+        arr.setDestinationAerodrome("DSTA");
+        fp.setArrival(arr);
+
+        FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+        FlightPlan.RouteElement mid = new FlightPlan.RouteElement();
+        mid.setSeqNum(1);
+        FlightPlan.Position pos = new FlightPlan.Position();
+        pos.setDesignatedPoint("MIDP");
+        pos.setLat(90.0);     // out of bounds, will be clamped in alternate
+        pos.setLon(190.0);    // out of bounds, will be wrapped in alternate
+        mid.setPosition(pos);
+        mid.setAirway("DCT");
+        route.setRouteElement(new ArrayList<>(List.of(mid)));
+        fp.setFiledRoute(route);
+        return fp;
     }
 }

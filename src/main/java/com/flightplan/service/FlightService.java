@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 /**
@@ -108,6 +109,23 @@ public class FlightService {
                 String type = determinePointType(pointName).equals("airport") ? "airport" : "waypoint";
                 routePoints.add(new FlightRoute.RoutePoint(pointName, lat, lon, type, el.getSeqNum()));
                 polyline.add(new double[]{lat, lon});
+
+                // Include airway points when available. The upstream geopoints feed provides a single
+                // representative coordinate per airway name (not a full segment graph), so we insert
+                // it as an intermediate "airway" point to reflect airway usage in the filed route.
+                String airwayName = el.getAirway();
+                if (airwayName != null && !airwayName.isBlank()) {
+                    String aw = airwayName.trim().toUpperCase(Locale.ROOT);
+                    if (!"DCT".equals(aw)) {
+                        GeoPoint airwayGp = fixMap.get(aw);
+                        if (airwayGp != null) {
+                            routePoints.add(new FlightRoute.RoutePoint(
+                                    aw, airwayGp.getLat(), airwayGp.getLon(), "airway", el.getSeqNum()
+                            ));
+                            polyline.add(new double[]{airwayGp.getLat(), airwayGp.getLon()});
+                        }
+                    }
+                }
             }
         }
 
@@ -131,6 +149,50 @@ public class FlightService {
         ));
     }
 
+    /**
+     * Optional extension: returns an alternate route based on the resolved route.
+     * Because the upstream data does not provide airway segment graphs, this generates a
+     * safe, deterministic "alternate" polyline by slightly offsetting intermediate points.
+     */
+    public Optional<FlightRoute> resolveAlternateRoute(String callsign) {
+        Optional<FlightRoute> primaryOpt = resolveRoute(callsign);
+        if (primaryOpt.isEmpty()) return Optional.empty();
+
+        FlightRoute primary = primaryOpt.get();
+        List<double[]> primaryLine = primary.getPolyline();
+        if (primaryLine == null || primaryLine.size() < 2) return Optional.of(primary);
+
+        double magnitude = 0.6 + (Math.abs(Objects.hashCode(callsign)) % 60) / 100.0; // 0.6..1.19 deg
+        double sign = (Math.abs(Objects.hashCode(callsign + ":alt")) % 2 == 0) ? 1.0 : -1.0;
+
+        List<double[]> altLine = new ArrayList<>(primaryLine.size());
+        for (int i = 0; i < primaryLine.size(); i++) {
+            double[] p = primaryLine.get(i);
+            if (p == null || p.length < 2) continue;
+            double lat = p[0];
+            double lon = p[1];
+
+            // Keep endpoints identical; nudge intermediate points.
+            if (i > 0 && i < primaryLine.size() - 1) {
+                double f = Math.sin(i * 1.7) * magnitude * sign;
+                lat = clampLat(lat + (f * 0.25));
+                lon = wrapLon(lon + (f * 0.35));
+            }
+            altLine.add(new double[]{lat, lon});
+        }
+
+        // Route points: keep as-is; only polyline changes for alternate visualisation.
+        return Optional.of(new FlightRoute(
+                primary.getCallsign(),
+                primary.getDepartureAerodrome(),
+                primary.getDestinationAerodrome(),
+                primary.getAircraftType(),
+                primary.getFlightType(),
+                primary.getRoutePoints(),
+                altLine
+        ));
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private Map<String, GeoPoint> buildFixMap() {
@@ -143,6 +205,17 @@ public class FlightService {
     private String determinePointType(String name) {
         if (name != null && name.length() == 4 && name.matches("[A-Z]{4}")) return "airport";
         return "waypoint";
+    }
+
+    private double clampLat(double lat) {
+        return Math.max(-85.0, Math.min(85.0, lat));
+    }
+
+    private double wrapLon(double lon) {
+        double x = lon;
+        while (x > 180.0) x -= 360.0;
+        while (x < -180.0) x += 360.0;
+        return x;
     }
 }
 

@@ -154,6 +154,33 @@ public class FlightController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    /**
+     * GET /api/route/{callsign}/alternate
+     * Optional extension: returns an alternate route polyline for the same flight.
+     */
+    @Operation(summary = "Resolve an alternate flight route (optional extension)",
+               description = "Returns an alternate route polyline for the same callsign. This is a best-effort alternate suitable for demo visualisation.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Alternate resolved route with polyline",
+            content = @Content(schema = @Schema(implementation = FlightRoute.class))),
+        @ApiResponse(responseCode = "404", description = "Callsign not found in cache", content = @Content),
+        @ApiResponse(responseCode = "400", description = "Invalid callsign format", content = @Content)
+    })
+    @GetMapping("/route/{callsign}/alternate")
+    public ResponseEntity<FlightRoute> getAlternateFlightRoute(
+            @PathVariable
+            @NotBlank
+            @Size(max = 8)
+            String callsign) {
+
+        String safe = inputSanitiser.sanitiseCallsign(callsign);
+        log.debug("GET /api/route/{callsign}/alternate (sanitised)");
+
+        return flightService.resolveAlternateRoute(safe)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     @Operation(summary = "List all airways geopoints", description = "Returns all airway geopoints from the cache.")
     @ApiResponse(responseCode = "200", description = "Airways list")
     @GetMapping("/geopoints/airways")
