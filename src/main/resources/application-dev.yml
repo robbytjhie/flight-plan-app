@@ -21,6 +21,11 @@
 #   mvn spring-boot:run -Dspring-boot.run.profiles=dev   (just don't start Redis)
 #   → look for: [LEADER] dev — Redis not reachable ... Falling back to in-memory
 # ══════════════════════════════════════════════════════════════════════════════
+# IM8 S5: override FLIGHT_API_KEY via env var for real API calls
+flight:
+  api:
+    base-url: ${FLIGHT_API_BASE_URL:https://api.swimapisg.info}
+    key: ${FLIGHT_API_KEY:dev-placeholder-key}
 
 # ── Redis connection (optional in dev) ───────────────────────────────────────
 spring:

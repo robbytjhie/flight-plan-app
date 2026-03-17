@@ -1,0 +1,32 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# MOCK PROFILE — in-memory mock data, no real API calls, no Redis required
+#
+# Activate:  mvn spring-boot:run -Dspring-boot.run.profiles=mock
+#            (used for unit/integration tests and offline demo)
+#
+# What this profile does:
+#   ✅  Serves mock flight data — no calls to api.swimapisg.info
+#   ✅  No WebClient created — MockDataFetchStrategy never makes network calls
+#   ✅  Redis OPTIONAL — same graceful fallback as dev/mock profile
+#   ✅  Swagger UI enabled
+#   ✅  DEBUG logging
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Redis connection (optional in mock) ──────────────────────────────────────
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+# ── Leader lock TTL ───────────────────────────────────────────────────────────
+leader:
+  lock:
+    ttl-ms: 50000
+
+# ── Verbose logging ───────────────────────────────────────────────────────────
+logging:
+  level:
+    com.flightplan: DEBUG
+    org.springframework.web: INFO

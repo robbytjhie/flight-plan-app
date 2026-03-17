@@ -64,7 +64,7 @@ public class LeaderElectionConfig {
     // ── dev: Redis is optional — probe connection, fall back gracefully ───────
 
     @Bean
-    @Profile("dev")
+    @Profile({"dev", "mock"})
     public LockRegistry devLockRegistry(RedisConnectionFactory connectionFactory) {
         try {
             // Probe the connection with a cheap PING before committing to Redis.

@@ -49,7 +49,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         }
 )
 @AutoConfigureMockMvc
-@ActiveProfiles("dev")
+@ActiveProfiles("mock")
 @DisplayName("FlightPlan Integration Tests")
 class FlightPlanIntegrationIT {
 
