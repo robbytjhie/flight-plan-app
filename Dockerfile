@@ -9,7 +9,9 @@ FROM eclipse-temurin:17-jre-alpine AS extractor
 WORKDIR /app
 # The fat JAR is built by CI before docker build runs
 COPY target/flight-plan-backend-*.jar app.jar
-RUN java -Djarmode=tools -jar app.jar extract --layers --launcher
+# Extract Spring Boot layers (dependencies/, spring-boot-loader/, snapshot-dependencies/, application/)
+# layertools is the most compatible extraction mode across Spring Boot versions.
+RUN java -Djarmode=layertools -jar app.jar extract
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM eclipse-temurin:17-jre-alpine AS runtime
