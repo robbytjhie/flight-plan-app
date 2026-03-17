@@ -84,6 +84,76 @@ class FlightDataCacheTest {
             assertThat(cache.getFlightPlans().get(0).getAircraftIdentification()).isEqualTo("SIA200");
         }
 
+        @Test @DisplayName("dedupes flight plans by callsign (case-insensitive)")
+        void dedupesByCallsignCaseInsensitive() {
+            List<FlightPlan> plans = List.of(
+                    buildPlan("SIA200"),
+                    buildPlan("sia200"),
+                    buildPlan("SIA200")
+            );
+            when(flightFetchService.fetchFlightPlans()).thenReturn(plans);
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftIdentification()).isEqualTo("SIA200");
+        }
+
+        @Test @DisplayName("keeps the newer duplicate when lastUpdatedTimeStamp is parseable")
+        void keepsNewerDuplicateByTimestamp() {
+            FlightPlan older = buildPlan("SIA200");
+            older.setLastUpdatedTimeStamp("2026-03-17T00:00:00Z");
+
+            FlightPlan newer = buildPlan("SIA200");
+            newer.setLastUpdatedTimeStamp("2026-03-17T01:00:00Z");
+            newer.setAircraftOperating("NEWER");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(older, newer));
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("NEWER");
+        }
+
+        @Test @DisplayName("prefers parseable timestamp over unparseable when deduping")
+        void prefersParseableTimestampOverUnparseable() {
+            FlightPlan badTs = buildPlan("SIA200");
+            badTs.setLastUpdatedTimeStamp("not-a-timestamp");
+
+            FlightPlan goodTs = buildPlan("SIA200");
+            goodTs.setLastUpdatedTimeStamp("2026-03-17T01:00:00Z");
+            goodTs.setAircraftOperating("GOOD");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(badTs, goodTs));
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("GOOD");
+        }
+
+        @Test @DisplayName("drops entries with blank callsign during refresh")
+        void dropsBlankCallsignEntries() {
+            FlightPlan blank = buildPlan("SIA200");
+            blank.setAircraftIdentification("   ");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(blank, buildPlan("EK432")));
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftIdentification()).isEqualTo("EK432");
+        }
+
         @Test @DisplayName("populates airways cache after successful fetch")
         void populatesAirwaysCache() {
             List<GeoPoint> airways = List.of(new GeoPoint("A576", 1.5, 104.1, "airway"));
