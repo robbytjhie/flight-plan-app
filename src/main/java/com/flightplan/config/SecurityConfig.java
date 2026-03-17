@@ -67,6 +67,9 @@ public class SecurityConfig {
                                  "/v3/api-docs/**", "/v3/api-docs").permitAll()
                 // Cache status — safe to expose; contains no sensitive data
                 .requestMatchers(HttpMethod.GET, "/api/cache/status").permitAll()
+                .requestMatchers("/swagger-ui/**").permitAll()
+                .requestMatchers("/swagger-ui.html").permitAll()
+                .requestMatchers("/v3/api-docs/**").permitAll()
                 .requestMatchers("/api/**").permitAll()   // ← tighten to authenticated() post-MVP
                 .anyRequest().denyAll()
             )
