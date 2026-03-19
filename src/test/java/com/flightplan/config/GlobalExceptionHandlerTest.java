@@ -2,16 +2,18 @@ package com.flightplan.config;
 
 import com.flightplan.controller.FlightController;
 import com.flightplan.service.FlightService;
-import jakarta.validation.ConstraintViolationException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.HttpMethod;
+import static org.assertj.core.api.Assertions.assertThat;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.ProblemDetail;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Set;
 
@@ -251,5 +253,30 @@ class GlobalExceptionHandlerTest {
             mockMvc.perform(get("/api/flights/SIA200"))
                     .andExpect(status().isInternalServerError());
         }
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for swagger-ui path directly")
+    void swaggerPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "swagger-ui/index.html");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
+        assertThat(result.getTitle()).isEqualTo("Not Found");
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for v3/api-docs path directly")
+    void apiDocsPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "v3/api-docs/swagger-config");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
     }
 }
