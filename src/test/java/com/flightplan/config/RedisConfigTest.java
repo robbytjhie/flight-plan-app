@@ -18,8 +18,22 @@ class RedisConfigTest {
     RedisConnectionFactory redisConnectionFactory;
 
     @Test
-    @DisplayName("RedisConnectionFactory bean is created successfully")
+    @DisplayName("RedisConnectionFactory bean is created successfully without password")
     void connectionFactoryBeanExists() {
         assertThat(redisConnectionFactory).isNotNull();
+    }
+
+    @Test
+    @DisplayName("RedisConnectionFactory bean is created successfully with password")
+    void connectionFactoryBeanExistsWithPassword() {
+        // Directly instantiate to exercise the password branch
+        RedisConfig config = new RedisConfig();
+        org.springframework.test.util.ReflectionTestUtils.setField(config, "redisHost", "localhost");
+        org.springframework.test.util.ReflectionTestUtils.setField(config, "redisPort", 6379);
+        org.springframework.test.util.ReflectionTestUtils.setField(config, "redisPassword", "test-secret");
+
+        RedisConnectionFactory factory = config.redisConnectionFactory();
+
+        assertThat(factory).isNotNull();
     }
 }
