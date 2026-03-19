@@ -45,3 +45,6 @@ logging:
   level:
     com.flightplan: DEBUG
     org.springframework.web: INFO
+openapi:
+  server-url: http://ad6a7f8148e0242e49470e80ed70de4c-e4d39a60fec22e86.elb.ap-southeast-1.amazonaws.com
+  server-description: Staging
