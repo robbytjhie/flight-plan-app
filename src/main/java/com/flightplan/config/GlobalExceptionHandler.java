@@ -37,7 +37,7 @@ public class GlobalExceptionHandler {
         ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
         detail.setTitle("Invalid Request");
         detail.setDetail(ex.getMessage());
-        detail.setType(URI.create("https://flightplan.example.gov.sg/errors/invalid-input"));
+        detail.setType(URI.create("https://flightplan.example.io/errors/invalid-input"));
         detail.setProperty("timestamp", Instant.now());
         return detail;
     }
@@ -49,7 +49,7 @@ public class GlobalExceptionHandler {
         ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
         detail.setTitle("Invalid Request");
         detail.setDetail("Required request parameter is missing.");
-        detail.setType(URI.create("https://flightplan.example.gov.sg/errors/invalid-input"));
+        detail.setType(URI.create("https://flightplan.example.io/errors/invalid-input"));
         detail.setProperty("timestamp", Instant.now());
         return detail;
     }
@@ -62,22 +62,34 @@ public class GlobalExceptionHandler {
         ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
         detail.setTitle("Invalid Request");
         detail.setDetail("Request parameter failed validation constraints.");
-        detail.setType(URI.create("https://flightplan.example.gov.sg/errors/invalid-input"));
+        detail.setType(URI.create("https://flightplan.example.io/errors/invalid-input"));
         detail.setProperty("timestamp", Instant.now());
         return detail;
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
     public ProblemDetail handleNoResource(NoResourceFoundException ex, WebRequest request) {
-        // Requests with illegal path characters (e.g. XSS payloads containing '<' '>')
-        // cannot be matched to any @PathVariable endpoint and fall through to the static
-        // resource handler, which throws NoResourceFoundException.  This is a malformed
-        // client request — return 400, not 500.
+        String path = ex.getResourcePath();
+
+        // Allow Swagger UI and OpenAPI paths to 404 naturally —
+        // returning 400 here breaks springdoc's internal resource resolution.
+        if (path != null && (
+                path.startsWith("swagger-ui") ||
+                        path.startsWith("v3/api-docs") ||
+                        path.startsWith("webjars/"))) {
+            ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.NOT_FOUND);
+            detail.setTitle("Not Found");
+            detail.setDetail("The requested resource was not found.");
+            detail.setType(URI.create("https://flightplan.example.io/errors/not-found"));
+            detail.setProperty("timestamp", Instant.now());
+            return detail;
+        }
+
         log.warn("[SECURITY] Unroutable path (possibly malformed/malicious input): {}", ex.getMessage());
         ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
         detail.setTitle("Invalid Request");
         detail.setDetail("The requested path is invalid.");
-        detail.setType(URI.create("https://flightplan.example.gov.sg/errors/invalid-input"));
+        detail.setType(URI.create("https://flightplan.example.io/errors/invalid-input"));
         detail.setProperty("timestamp", Instant.now());
         return detail;
     }
@@ -89,7 +101,7 @@ public class GlobalExceptionHandler {
         ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.INTERNAL_SERVER_ERROR);
         detail.setTitle("Internal Server Error");
         detail.setDetail("An unexpected error occurred. Please contact support.");
-        detail.setType(URI.create("https://flightplan.example.gov.sg/errors/internal"));
+        detail.setType(URI.create("https://flightplan.example.io/errors/internal"));
         detail.setProperty("timestamp", Instant.now());
         return detail;
     }

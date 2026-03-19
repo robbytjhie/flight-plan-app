@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.Set;
@@ -46,7 +47,7 @@ class GlobalExceptionHandlerTest {
     @Autowired
     MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     FlightService flightService;
 
     // ── Branch 1: IllegalArgumentException → 400 ─────────────────────
@@ -91,7 +92,7 @@ class GlobalExceptionHandlerTest {
                             .param("callsign", "<xss>"))
                     .andExpect(status().isBadRequest())
                     .andExpect(jsonPath("$.type").value(
-                            containsString("flightplan.example.gov.sg/errors")));
+                            containsString("flightplan.example.io/errors")));
         }
     }
 
@@ -227,7 +228,7 @@ class GlobalExceptionHandlerTest {
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.timestamp").exists())
                     .andExpect(jsonPath("$.type").value(
-                            containsString("flightplan.example.gov.sg/errors/internal")));
+                            containsString("flightplan.example.io/errors/internal")));
         }
 
         @Test
