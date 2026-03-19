@@ -4,35 +4,40 @@ metadata:
   name: flightplan-ingress
   namespace: flightplan
   annotations:
-    # IM8 S5: force HTTPS redirect
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    # Timeouts
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
-    # IM8 S4: rate limiting at ingress level (belt-and-braces with nginx.conf)
     nginx.ingress.kubernetes.io/limit-rps: "20"
-    # IM8 S8: Clickjacking
-    nginx.ingress.kubernetes.io/custom-http-headers: |
-      X-Frame-Options: DENY
-    # IM8 S6: MIME sniffing
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      add_header X-Content-Type-Options "nosniff" always;
-      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-      add_header Permissions-Policy "geolocation=(), camera=(), microphone=()" always;
-    # TLS: replace with your cluster-issuer name
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   ingressClassName: nginx
-  tls:
-    - hosts:
-        - flightplan.example.com    # 🔁 Replace with your domain
-      secretName: flightplan-tls
   rules:
-    - host: flightplan.example.com  # 🔁 Replace with your domain
+    - host: ad6a7f8148e0242e49470e80ed70de4c-e4d39a60fec22e86.elb.ap-southeast-1.amazonaws.com
       http:
         paths:
           - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          # Swagger UI — must be before / catch-all to avoid frontend routing
+          - path: /swagger-ui.html
+            pathType: Exact
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          - path: /swagger-ui
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          - path: /v3/api-docs
             pathType: Prefix
             backend:
               service:

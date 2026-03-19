@@ -1,0 +1,416 @@
+name: CI/CD — Backend Build, Test, Quality Gate & Deploy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trigger matrix:
+#   pull_request  → test-backend + scan + Sonar (no deploy)
+#   push develop  → all of the above + build images + deploy Kubernetes staging
+#   push main     → all of the above + build images + deploy Kubernetes prod
+#   tag v*.*.*    → same as main push
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ main, develop, develop-refactoring, 'feature/**' ]
+    tags:     [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main, develop, develop-refactoring ]
+
+env:
+  JAVA_VERSION:      '17'
+  REGISTRY:          ghcr.io
+  BACKEND_IMAGE:     ${{ github.repository_owner }}/flightplan-backend
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Backend: compile, unit tests, integration tests, JaCoCo, Sonar
+  # ─────────────────────────────────────────────────────────────────────────
+  test-backend:
+    name: 🧪 Backend — Test · Coverage · Sonar
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: .
+
+    # ── ADDED: expose version output so other jobs can use same version ──────
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # Sonar needs full history for blame & new-code detection
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      # ── ADDED: Determine version based on branch/tag ─────────────────────
+      # develop → 1.0.X-SNAPSHOT   main or tag → 1.0.X
+      # X = github.run_number which auto-increments on every pipeline run
+      - name: Set version
+        id: version
+        run: |
+          BUILD_NUMBER=${{ github.run_number }}
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+             [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="1.0.${BUILD_NUMBER}"
+          else
+            VERSION="1.0.${BUILD_NUMBER}-SNAPSHOT"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+
+      # ── Tests + JaCoCo coverage (single mvn verify pass) ────────────────────
+      # WHY ONE STEP: separate mvn invocations each overwrite target/jacoco.exec.
+      # A second pass without -Dspring.profiles.active=dev causes @Profile('dev')
+      # beans to be absent, Spring context failures, tests skipped, and jacoco
+      # measuring near-zero coverage. One pass = one exec file = correct numbers.
+      - name: Test, report & enforce coverage
+        run: |
+          mvn -B verify \
+            -Drevision=${{ steps.version.outputs.version }} \
+            -Dspring.profiles.active=dev \
+            -Dsecurity.cors.allowed-origins=http://localhost:3000 \
+            -Djacoco.line.minimum=0.90 \
+            -Djacoco.branch.minimum=0.85
+        env:
+          MAVEN_OPTS: '-Xmx1g'
+
+      - name: Upload JaCoCo HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          retention-days: 14
+
+      # ── SonarCloud quality gate ───────────────────────────────────────────
+      # Gate requirements: coverage ≥ 90%, 0 blocker/critical issues,
+      # 0 unreviewed security hotspots.
+      - name: SonarCloud analysis
+        run: |
+          echo "SONAR_PROJECT_KEY length: ${#SONAR_PROJECT_KEY}"
+          echo "SONAR_PROJECT_KEY starts with: ${SONAR_PROJECT_KEY:0:5}***"
+          echo "SONAR_ORG length: ${#SONAR_ORG}"
+          echo "SONAR_ORG starts with: ${SONAR_ORG:0:5}***"
+          echo "SONAR_TOKEN length: ${#SONAR_TOKEN}"
+          echo "SONAR_TOKEN is empty: $([[ -z $SONAR_TOKEN ]] && echo YES || echo NO)"
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            mvn -B sonar:sonar \
+              -Drevision=${{ steps.version.outputs.version }} \
+              -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+              -Dsonar.organization="${SONAR_ORG}" \
+              -Dsonar.host.url=https://sonarcloud.io \
+              -Dsonar.token="${SONAR_TOKEN}" \
+              -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+              -Dsonar.qualitygate.wait=false \
+              -Dsonar.branch.name=main \
+              -Dsonar.qualitygate.timeout=300 && break
+            echo "Attempt $i failed, waiting 30s before retry..."
+            sleep 30
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          SONAR_ORG: ${{ secrets.SONAR_ORG }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # ── Build fat JAR ─────────────────────────────────────────────────────
+      # ── ADDED: -Drevision= so JAR filename includes version ──────────────
+      # develop → flight-plan-backend-1.0.42-SNAPSHOT.jar
+      # main    → flight-plan-backend-1.0.42.jar
+      - name: Package JAR
+        run: |
+          mvn -B package -DskipTests \
+            -Drevision=${{ steps.version.outputs.version }}
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: target/*.jar
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Vulnerability scan (Trivy) on Docker images
+  # Runs on every push and PR — blocks pipeline on HIGH/CRITICAL CVEs
+  # ─────────────────────────────────────────────────────────────────────────
+  scan-images:
+    name: 🔍 Container Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    #    needs: [ test-backend ]
+    needs: [ test-backend ]
+    permissions:
+      contents: read
+      security-events: write      # upload SARIF to GitHub Security tab
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download JAR for backend scan
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: target/
+
+      - name: Build backend image (local, scan only)
+        run: docker build -t flightplan-backend:scan .
+
+      # ── Step 1: Human-readable table printed to the job log ─────────────
+      # Read findings here in the Actions log before the pipeline fails.
+      # exit-code: '0' so this never blocks — SARIF step below is the gate.
+      - name: Scan backend image (table — human readable)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: flightplan-backend:scan
+          format:    table
+          severity:  HIGH,CRITICAL
+          list-all-pkgs: true
+          exit-code: '0'
+
+      # ── Step 2: SARIF upload → GitHub Security tab ──────────────────────
+      # SARIF format scans ALL severities by design — severity filter does
+      # not apply here. exit-code: '0' because the table step above is the
+      # pipeline gate. This step is purely for GitHub Security tab reporting.
+      - name: Scan backend image (SARIF — GitHub Security upload)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: flightplan-backend:scan
+          format: sarif
+          output: trivy-backend.sarif
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: '.'
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Build & push Docker images to GHCR
+  # Runs only on push to main/develop or release tag (not on PRs)
+  # ─────────────────────────────────────────────────────────────────────────
+  build-push-images:
+    name: 🐳 Build & Push Images → GHCR
+    runs-on: ubuntu-latest
+    # ── ADDED: test-backend added to needs so version output is available ───
+    needs: [ test-backend ]
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/develop' ||
+       github.ref == 'refs/heads/develop-refactoring' ||
+       startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      short-sha:    ${{ steps.sha.outputs.short }}
+      backend-tag:  ${{ steps.meta-backend.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: target/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry:  ${{ env.REGISTRY }}
+          username:  ${{ github.actor }}
+          password:  ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Backend image ────────────────────────────────────────────────────
+      - name: Docker metadata — backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=ref,event=branch,suffix=-{{sha}}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            # ── ADDED: versioned tag matching JAR version ─────────────────
+            # develop → 1.0.42-SNAPSHOT   main → 1.0.42
+            type=raw,value=${{ needs.test-backend.outputs.version }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context:    .
+          push:       true
+          tags:       ${{ steps.meta-backend.outputs.tags }}
+          labels:     ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 4 — Deploy to Kubernetes
+  # main         → prod cluster  (flightplan-prod)
+  # all others   → staging cluster (flightplan-staging)
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy → Kubernetes ${{ github.ref == 'refs/heads/main' && '(Production)' || '(Staging)' }}
+    runs-on: ubuntu-latest
+    needs: [ scan-images, build-push-images ]
+    if: |
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop' ||
+      github.ref == 'refs/heads/develop-refactoring' ||
+      startsWith(github.ref, 'refs/heads/feature/') ||
+      startsWith(github.ref, 'refs/heads/mock/') ||
+      startsWith(github.ref, 'refs/tags/v')
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: latest
+
+      # ── ADDED: Configure AWS credentials for EKS authentication ──────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ── ADDED: Verify AWS credentials are valid before proceeding ─────────
+      - name: Verify AWS credentials
+        run: |
+          echo "AWS_REGION length: ${#AWS_REGION}"
+          echo "AWS_REGION value: ${AWS_REGION}"
+          echo "AWS_ACCESS_KEY_ID length: ${#AWS_ACCESS_KEY_ID}"
+          echo "AWS_ACCESS_KEY_ID starts with: ${AWS_ACCESS_KEY_ID:0:4}***"
+          echo "AWS_SECRET_ACCESS_KEY length: ${#AWS_SECRET_ACCESS_KEY}"
+          echo "AWS_SECRET_ACCESS_KEY is empty: $([[ -z $AWS_SECRET_ACCESS_KEY ]] && echo YES || echo NO)"
+          aws sts get-caller-identity
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          # main → prod cluster, everything else → staging cluster
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            SECRET="${{ secrets.KUBE_CONFIG_PROD || secrets.KUBE_CONFIG }}"
+            CLUSTER="flightplan-prod"
+          else
+            SECRET="${{ secrets.KUBE_CONFIG_STAGING || secrets.KUBE_CONFIG }}"
+            CLUSTER="flightplan-staging"
+          fi
+            echo "${SECRET}" | base64 -d > ~/.kube/config || \
+              (echo "❌ kubeconfig secret is missing or not valid base64" && exit 1)
+            chmod 600 ~/.kube/config
+            echo "✅ Using cluster: ${CLUSTER}"
+
+      - name: Debug — show cluster context
+        run: |
+          kubectl config current-context
+          kubectl cluster-info
+          kubectl get namespaces
+
+      - name: Dry-run validate manifests
+        run: |
+          kubectl apply --dry-run=client -f k8s/namespace.yaml
+          kubectl apply --dry-run=client -f k8s/redis.yaml
+          kubectl apply --dry-run=client -f k8s/backend.yaml
+          kubectl apply --dry-run=client -f k8s/ingress.yaml
+          kubectl apply --dry-run=client -f k8s/hpa.yaml
+
+      # Verify flightplan-secrets exists in the namespace BEFORE applying
+      # manifests. Both redis.yaml and backend.yaml reference this secret — if it
+      # is missing, pods crash on startup and the rollout times out with a cryptic
+      # "exceeded progress deadline" error instead of a clear message.
+      - name: Pre-flight — verify flightplan-secrets exists
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          if ! kubectl get secret flightplan-secrets -n flightplan &>/dev/null; then
+            echo "❌ ERROR: Secret 'flightplan-secrets' not found in namespace 'flightplan'."
+            echo ""
+            echo "Run this once to create it:"
+            echo "  kubectl create secret generic flightplan-secrets \\"
+            echo "    --from-literal=FLIGHT_API_KEY=<real-key> \\"
+            echo "    --from-literal=FLIGHT_API_BASE_URL=https://api.swimapisg.info \\"
+            echo "    --from-literal=REDIS_PASSWORD=<strong-password> \\"
+            echo "    --from-literal=CORS_ALLOWED_ORIGINS=https://<your-frontend-domain> \\"
+            echo "    -n flightplan"
+            exit 1
+          fi
+          echo "✅ flightplan-secrets found — proceeding with deployment."
+
+      # IM8: do NOT apply secret.yaml in CI — secrets must be pre-provisioned
+      # in the cluster via external secrets operator or manual kubectl create.
+      - name: Apply Kubernetes manifests (no secrets)
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/redis.yaml
+          sed "s|\${GITHUB_REPOSITORY_OWNER}|${{ github.repository_owner }}|g" k8s/backend.yaml | kubectl apply -f -
+          kubectl apply -f k8s/ingress.yaml
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Pin images to this SHA
+        # Use the actual image tag output from build-push-images job.
+        # Previously hardcoded ':main-sha-${SHA}' which only matched images built
+        # from the main branch. On develop-refactoring the pushed tag is the
+        # versioned tag (e.g. 1.0.42-SNAPSHOT) — use that directly.
+        run: |
+          IMAGE_TAG=${{ needs.build-push-images.outputs.backend-tag }}
+          kubectl set image deployment/flightplan-backend \
+            backend=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${IMAGE_TAG} \
+            -n flightplan
+
+      - name: Set Spring profile
+        # mock/**          → mock  (MockDataFetchStrategy, no real API)
+        # main / tags      → prod  (LiveDataFetchStrategy, real API)
+        # all others       → dev   (LiveDataFetchStrategy, real API)
+        run: |
+          if [[ "${{ github.ref }}" == refs/heads/mock/* ]]; then
+            SPRING_PROFILE="mock"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+               [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            SPRING_PROFILE="prod"
+          else
+            SPRING_PROFILE="dev"
+          fi
+          echo "Setting SPRING_PROFILES_ACTIVE=${SPRING_PROFILE}"
+          kubectl set env deployment/flightplan-backend \
+            SPRING_PROFILES_ACTIVE=${SPRING_PROFILE} \
+            -n flightplan
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/flightplan-backend  -n flightplan --timeout=120s
+
+      - name: Verify deployment
+        run: |
+          echo "📦 Backend pods:"
+          kubectl get pods -n flightplan -l app=flightplan-backend
+          echo ""
+          echo "🌐 Services:"
+          kubectl get services -n flightplan

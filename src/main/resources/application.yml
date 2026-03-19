@@ -1,0 +1,86 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# BASE CONFIGURATION — shared by all profiles
+#
+# Profile-specific overrides live in:
+#   application-dev.yml   →  mock data, in-memory lock, no Redis
+#   application-prod.yml  →  real API (api.swimapisg.info), Redis lock
+#
+# How to activate a profile:
+#   Dev:   mvn spring-boot:run -Dspring-boot.run.profiles=dev
+#   Prod:  SPRING_PROFILES_ACTIVE=prod  (env var, set in K8s / Docker)
+#
+# Default profile if none is set: dev  (safe fallback — never hits real API)
+# ══════════════════════════════════════════════════════════════════════════════
+
+spring:
+  application:
+    name: flight-plan-backend
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}   # default to dev if not explicitly set
+
+server:
+  port: 8080
+  error:
+    include-message: never          # IM8 S6: never leak exception messages to clients
+    include-binding-errors: never
+    include-stacktrace: never
+    include-exception: false
+
+# ── CORS ─────────────────────────────────────────────────────────────────────
+# IM8 S7: override in production with the real frontend domain
+security:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
+# ── Cache / scheduler ────────────────────────────────────────────────────────
+cache:
+  refresh:
+    # Default: 10 minutes (600000 ms). Override via CACHE_REFRESH_RATE_MS if needed.
+    rate-ms: ${CACHE_REFRESH_RATE_MS:600000}
+    initial-delay-ms: ${CACHE_REFRESH_INITIAL_DELAY_MS:5000}
+
+# ── Actuator ─────────────────────────────────────────────────────────────────
+# IM8 S2: expose only health + prometheus; no sensitive endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: never
+    prometheus:
+      access: read-only
+    info:
+      access: read-only
+  info:
+    env:
+      enabled: false
+    java:
+      enabled: false
+    os:
+      enabled: false
+
+# ── Swagger / OpenAPI ─────────────────────────────────────────────────────────
+# Disable in production via SPRINGDOC_SWAGGER_UI_ENABLED=false
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:true}
+    tags-sorter: alpha
+    operations-sorter: alpha
+    display-request-duration: true
+    try-it-out-enabled: true
+  api-docs:
+    path: /v3/api-docs
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:true}
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# IM8 S2: structured logging for SIEM ingestion; level overridden per profile
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ} [%thread] %-5level %logger{36} - %msg%n"
+  level:
+    org.springframework.web: WARN
+    org.springframework.security: WARN

@@ -22,6 +22,8 @@ spec:
     spec:
       # IM8 S1: do not mount service-account token unless required
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: backend
           image: ghcr.io/${GITHUB_REPOSITORY_OWNER}/flightplan-backend:latest
@@ -29,6 +31,8 @@ spec:
           ports:
             - containerPort: 8080
           env:
+#            - name: SPRING_PROFILES_ACTIVE
+#              value: "prod"
             - name: FLIGHT_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -59,10 +63,10 @@ spec:
               value: "30000"
           resources:
             requests:
-              memory: "512Mi"   # bumped: Spring Boot + Redis client needs headroom
+              memory: "256Mi"   # reduced from 512Mi
               cpu: "200m"
             limits:
-              memory: "768Mi"
+              memory: "512Mi"   # reduced from 768Mi
               cpu: "500m"
           # IM8 S1: minimal container privileges
           securityContext:
