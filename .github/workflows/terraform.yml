@@ -38,6 +38,14 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Create Terraform state bucket if missing
+        run: |
+          aws s3api head-bucket --bucket flight-plan-tfstate 2>/dev/null || \
+          aws s3api create-bucket \
+            --bucket flight-plan-tfstate \
+            --region ap-southeast-1 \
+            --create-bucket-configuration LocationConstraint=ap-southeast-1
+
       - name: Terraform Init
         run: terraform init
 
