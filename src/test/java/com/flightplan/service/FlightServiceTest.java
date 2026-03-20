@@ -729,7 +729,7 @@ class FlightServiceTest {
             arr.setDestinationAerodrome("YSSY");
             fp.setArrival(arr);
             FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
-            route.setRouteElement(List.of());
+            route.setRouteElement(new ArrayList<>());
             fp.setFiledRoute(route);
             return fp;
         }
