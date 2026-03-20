@@ -236,10 +236,12 @@ class GlobalExceptionHandlerTest {
         @Test
         @DisplayName("NullPointerException from service is handled as 500")
         void nullPointerExceptionHandledAs500() throws Exception {
-            when(flightService.getAirways())
+            // Use /api/flights (always permitted) to trigger the 500 path —
+            // /api/geopoints/** is blocked externally (403) and cannot reach the handler.
+            when(flightService.getAllFlightPlans())
                     .thenThrow(new NullPointerException("null ref in service"));
 
-            mockMvc.perform(get("/api/geopoints/airways"))
+            mockMvc.perform(get("/api/flights"))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.title").value("Internal Server Error"));
         }

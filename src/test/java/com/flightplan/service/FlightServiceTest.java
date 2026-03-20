@@ -701,4 +701,174 @@ class FlightServiceTest {
         fp.setFiledRoute(route);
         return fp;
     }
+
+    // ── Fix map caching ───────────────────────────────────────────────────────
+
+    /**
+     * Tests for getCachedFixMap() — verifies that the 247K-entry fix map is built
+     * once per cache refresh cycle and not rebuilt on every resolveRoute() call.
+     *
+     * Strategy: stub getLastRefreshed() to return a fixed Instant, call resolveRoute()
+     * multiple times, and assert that getFixes() / getAirways() are only called once
+     * (the first build). Changing the Instant simulates a leader cache refresh and
+     * verifies the map is rebuilt exactly once more.
+     */
+    @Nested @DisplayName("fix map caching")
+    class FixMapCachingTests {
+
+        private final Instant T1 = Instant.parse("2026-03-20T10:00:00Z");
+        private final Instant T2 = Instant.parse("2026-03-20T10:10:00Z");
+
+        private FlightPlan simplePlan(String callsign) {
+            FlightPlan fp = new FlightPlan();
+            fp.setAircraftIdentification(callsign);
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            fp.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            fp.setArrival(arr);
+            FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+            route.setRouteElement(List.of());
+            fp.setFiledRoute(route);
+            return fp;
+        }
+
+        @Test
+        @DisplayName("getFixes() and getAirways() are called once for multiple resolveRoute() calls with same lastRefreshed")
+        void fixMapBuiltOnlyOncePerRefreshCycle() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix"),
+                    new GeoPoint("YSSY", -33.94, 151.17, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+
+            // Three calls with the same lastRefreshed timestamp
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+
+            // Fix map should only have been built once — getFixes/getAirways called once each
+            verify(flightDataCache, times(1)).getFixes();
+            verify(flightDataCache, times(1)).getAirways();
+        }
+
+        @Test
+        @DisplayName("fix map is rebuilt exactly once when lastRefreshed changes (leader refresh)")
+        void fixMapRebuiltAfterCacheRefresh() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix"),
+                    new GeoPoint("YSSY", -33.94, 151.17, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            // First refresh cycle — two calls, map built once
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            verify(flightDataCache, times(1)).getFixes();
+
+            // Leader refreshes the cache — timestamp changes
+            when(flightDataCache.getLastRefreshed()).thenReturn(T2);
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+
+            // getFixes should now have been called exactly twice total (once per refresh)
+            verify(flightDataCache, times(2)).getFixes();
+            verify(flightDataCache, times(2)).getAirways();
+        }
+
+        @Test
+        @DisplayName("fix map is built on first call when snapshot is null (cold start)")
+        void fixMapBuiltOnColdStart() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+
+            // Fresh service instance — snapshot is null
+            FlightService freshService = new FlightService(flightDataCache);
+            freshService.resolveRoute("SIA200");
+
+            verify(flightDataCache, times(1)).getFixes();
+            verify(flightDataCache, times(1)).getAirways();
+        }
+
+        @Test
+        @DisplayName("fix map built from null lastRefreshed (cache not yet refreshed) and reused")
+        void fixMapWorksWithNullLastRefreshed() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(null);
+
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+
+            // Null timestamp is a valid key — map still built only once
+            verify(flightDataCache, times(1)).getFixes();
+        }
+
+        @Test
+        @DisplayName("routes are correctly resolved using the cached fix map")
+        void cachedFixMapProducesCorrectRoute() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+
+            Optional<FlightRoute> route = service.resolveRoute("SIA200");
+
+            assertThat(route).isPresent();
+            assertThat(route.get().getDepartureAerodrome()).isEqualTo("WSSS");
+            assertThat(route.get().getDestinationAerodrome()).isEqualTo("YSSY");
+            assertThat(route.get().getPolyline()).hasSize(2);
+
+            // Call again — same result, still from cache
+            Optional<FlightRoute> route2 = service.resolveRoute("SIA200");
+            assertThat(route2).isPresent();
+            assertThat(route2.get().getPolyline()).hasSize(2);
+
+            // Map only built once
+            verify(flightDataCache, times(1)).getFixes();
+        }
+
+        @Test
+        @DisplayName("each N-minute refresh cycle triggers exactly one map rebuild regardless of call volume")
+        void exactlyOneRebuildPerRefreshCycle() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            // Simulate three 10-minute refresh cycles with 5 requests each
+            Instant[] cycles = {
+                Instant.parse("2026-03-20T10:00:00Z"),
+                Instant.parse("2026-03-20T10:10:00Z"),
+                Instant.parse("2026-03-20T10:20:00Z")
+            };
+
+            for (Instant cycle : cycles) {
+                when(flightDataCache.getLastRefreshed()).thenReturn(cycle);
+                for (int i = 0; i < 5; i++) {
+                    service.resolveRoute("SIA200");
+                }
+            }
+
+            // 3 cycles × 1 rebuild each = 3 total getFixes calls
+            verify(flightDataCache, times(3)).getFixes();
+            verify(flightDataCache, times(3)).getAirways();
+        }
+    }
 }

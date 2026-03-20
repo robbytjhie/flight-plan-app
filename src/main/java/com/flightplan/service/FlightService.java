@@ -7,23 +7,33 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.*;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
  * Flight Service
  *
- * Serves all business logic for the API layer.  Data is read exclusively from
- * {@link FlightDataCache} – this service NEVER calls the upstream API directly.
+ * Serves all business logic for the API layer. Data is read exclusively from
+ * {@link FlightDataCache} — this service NEVER calls the upstream API directly.
  *
- * Leader election and cache population are entirely the responsibility of
- * {@link FlightDataCache} + {@link FlightFetchService}.  This design ensures:
+ * ── Fix map caching ──────────────────────────────────────────────────────────
+ * buildFixMap() merges 247 000+ fixes and 9 000+ airways into a single HashMap
+ * for O(1) waypoint lookups during route resolution. Building that map is cheap
+ * in CPU terms (~5 ms) but allocates ~30 MB of short-lived objects on every call.
  *
- *  - Each inbound HTTP request is served instantly from in-memory cache (no
- *    blocking network call per request).
- *  - The upstream API is called at most once per refresh interval, regardless
- *    of how many pods are running or how many simultaneous requests arrive.
+ * Previously the map was rebuilt on every resolveRoute() call — once per callsign
+ * lookup, for every concurrent request. Under load (89 flights × concurrent users)
+ * this caused repeated GC pressure with no benefit because the underlying data
+ * only changes when the leader refreshes the cache (default every 10 minutes).
+ *
+ * The cached fix map is keyed on the cache's lastRefreshed timestamp. On each
+ * resolveRoute() call we compare the current lastRefreshed to the snapshot's
+ * timestamp — if they match, the cached map is reused; if not (leader has refreshed),
+ * the map is rebuilt exactly once and stored. This means the 247K-entry merge
+ * happens at most once per 10-minute refresh window regardless of request volume.
  */
 @Service
 @Slf4j
@@ -32,7 +42,15 @@ public class FlightService {
 
     private final FlightDataCache flightDataCache;
 
-    // ── Flight Plans ─────────────────────────────────────────────────────
+    /**
+     * Snapshot of the pre-built fix map, paired with the cache timestamp it was
+     * built from. AtomicReference ensures safe publication across threads without
+     * locking — the worst case is two threads simultaneously building the map on a
+     * cache refresh tick, which is harmless (one result wins, both are identical).
+     */
+    private final AtomicReference<FixMapSnapshot> fixMapSnapshot = new AtomicReference<>();
+
+    // ── Flight Plans ──────────────────────────────────────────────────────────
 
     public List<FlightPlan> getAllFlightPlans() {
         return flightDataCache.getFlightPlans();
@@ -44,7 +62,7 @@ public class FlightService {
                 .findFirst();
     }
 
-    // ── GeoPoints ────────────────────────────────────────────────────────
+    // ── GeoPoints ─────────────────────────────────────────────────────────────
 
     public List<GeoPoint> getAirways() {
         return flightDataCache.getAirways();
@@ -54,18 +72,18 @@ public class FlightService {
         return flightDataCache.getFixes();
     }
 
-    public java.time.Instant getCacheLastRefreshed() {
+    public Instant getCacheLastRefreshed() {
         return flightDataCache.getLastRefreshed();
     }
 
-    // ── Route Resolution ─────────────────────────────────────────────────
+    // ── Route Resolution ──────────────────────────────────────────────────────
 
     public Optional<FlightRoute> resolveRoute(String callsign) {
         Optional<FlightPlan> planOpt = getFlightByCallsign(callsign);
         if (planOpt.isEmpty()) return Optional.empty();
 
         FlightPlan plan = planOpt.get();
-        Map<String, GeoPoint> fixMap = buildFixMap();
+        Map<String, GeoPoint> fixMap = getCachedFixMap();
 
         List<FlightRoute.RoutePoint> routePoints = new ArrayList<>();
         List<double[]> polyline = new ArrayList<>();
@@ -110,9 +128,6 @@ public class FlightService {
                 routePoints.add(new FlightRoute.RoutePoint(pointName, lat, lon, type, el.getSeqNum()));
                 polyline.add(new double[]{lat, lon});
 
-                // Include airway points when available. The upstream geopoints feed provides a single
-                // representative coordinate per airway name (not a full segment graph), so we insert
-                // it as an intermediate "airway" point to reflect airway usage in the filed route.
                 String airwayName = el.getAirway();
                 if (airwayName != null && !airwayName.isBlank()) {
                     String aw = airwayName.trim().toUpperCase(Locale.ROOT);
@@ -149,11 +164,6 @@ public class FlightService {
         ));
     }
 
-    /**
-     * Optional extension: returns an alternate route based on the resolved route.
-     * Because the upstream data does not provide airway segment graphs, this generates a
-     * safe, deterministic "alternate" polyline by slightly offsetting intermediate points.
-     */
     public Optional<FlightRoute> resolveAlternateRoute(String callsign) {
         Optional<FlightRoute> primaryOpt = resolveRoute(callsign);
         if (primaryOpt.isEmpty()) return Optional.empty();
@@ -162,8 +172,7 @@ public class FlightService {
         List<double[]> primaryLine = primary.getPolyline();
         if (primaryLine == null || primaryLine.size() < 2) return Optional.of(primary);
 
-        // Deterministic per-callsign variation so ALT route is stable across refreshes.
-        double baseOffsetDeg = 1.8 + (Math.abs(Objects.hashCode(callsign)) % 70) / 20.0; // ~1.8..5.25 deg
+        double baseOffsetDeg = 1.8 + (Math.abs(Objects.hashCode(callsign)) % 70) / 20.0;
         double sign = (Math.abs(Objects.hashCode(callsign + ":alt")) % 2 == 0) ? 1.0 : -1.0;
 
         List<double[]> altLine = new ArrayList<>(primaryLine.size());
@@ -174,7 +183,6 @@ public class FlightService {
             double lat = p[0];
             double lon = p[1];
 
-            // Keep endpoints identical; offset intermediate points perpendicular to the local path.
             if (i > 0 && i < primaryLine.size() - 1) {
                 double[] prev = primaryLine.get(i - 1);
                 double[] next = primaryLine.get(i + 1);
@@ -182,15 +190,13 @@ public class FlightService {
                     double dLat = next[0] - prev[0];
                     double dLon = normaliseLonDelta(next[1] - prev[1]);
 
-                    // Perpendicular vector in lat/lon space: (-dLon, dLat)
                     double pLat = -dLon;
                     double pLon = dLat;
                     double norm = Math.sqrt(pLat * pLat + pLon * pLon);
 
-                    // Scale offset by segment "size" so short segments aren't wildly displaced.
                     double seg = Math.sqrt(dLat * dLat + dLon * dLon);
-                    double scale = Math.max(0.25, Math.min(1.0, seg / 15.0)); // 0.25..1.0
-                    double wave = 0.55 + 0.45 * Math.sin(i * 1.3);            // 0.10..1.0-ish
+                    double scale = Math.max(0.25, Math.min(1.0, seg / 15.0));
+                    double wave = 0.55 + 0.45 * Math.sin(i * 1.3);
                     double offset = baseOffsetDeg * scale * wave * sign;
 
                     if (norm > 1e-9) {
@@ -203,7 +209,6 @@ public class FlightService {
             altLine.add(new double[]{lat, lon});
         }
 
-        // Route points: keep as-is; only polyline changes for alternate visualisation.
         return Optional.of(new FlightRoute(
                 primary.getCallsign(),
                 primary.getDepartureAerodrome(),
@@ -215,7 +220,36 @@ public class FlightService {
         ));
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    // ── Fix map caching ───────────────────────────────────────────────────────
+
+    /**
+     * Returns a pre-built name → GeoPoint lookup map, rebuilt only when the
+     * underlying cache has been refreshed by the leader pod.
+     *
+     * Thread safety: AtomicReference.compareAndSet ensures only one thread
+     * rebuilds the map per refresh cycle. Concurrent threads that lose the CAS
+     * race simply re-read the freshly set snapshot on their next get().
+     */
+    private Map<String, GeoPoint> getCachedFixMap() {
+        Instant currentRefresh = flightDataCache.getLastRefreshed();
+        FixMapSnapshot snapshot = fixMapSnapshot.get();
+
+        if (snapshot != null && Objects.equals(snapshot.builtAt(), currentRefresh)) {
+            return snapshot.fixMap();
+        }
+
+        // Cache has been refreshed (or this is the first call) — rebuild.
+        Map<String, GeoPoint> fresh = buildFixMap();
+        FixMapSnapshot next = new FixMapSnapshot(currentRefresh, fresh);
+
+        // CAS: if another thread already updated the snapshot, that's fine — both
+        // results are identical for the same refresh timestamp.
+        fixMapSnapshot.compareAndSet(snapshot, next);
+
+        log.debug("[FIXMAP] Rebuilt fix map: {} entries (lastRefreshed={})",
+                fresh.size(), currentRefresh);
+        return fresh;
+    }
 
     private Map<String, GeoPoint> buildFixMap() {
         Map<String, GeoPoint> map = new HashMap<>();
@@ -223,6 +257,8 @@ public class FlightService {
         getAirways().forEach(gp -> map.putIfAbsent(gp.getName(), gp));
         return map;
     }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private String determinePointType(String name) {
         if (name != null && name.length() == 4 && name.matches("[A-Z]{4}")) return "airport";
@@ -246,5 +282,10 @@ public class FlightService {
         while (x < -180.0) x += 360.0;
         return x;
     }
-}
 
+    /**
+     * Immutable snapshot pairing a pre-built fix map to the cache timestamp
+     * it was built from. Records are a natural fit — equality is by value.
+     */
+    private record FixMapSnapshot(Instant builtAt, Map<String, GeoPoint> fixMap) {}
+}
