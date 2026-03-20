@@ -563,6 +563,50 @@ class FlightServiceTest {
         }
     }
 
+    // ── resolveWaypointAlternateRoutes (city-to-city heuristic) ────────
+
+    @Nested @DisplayName("resolveWaypointAlternateRoutes()")
+    class ResolveWaypointAlternateRoutesTests {
+
+        @Test @DisplayName("returns waypoint alternates A->C->B and excludes primary intermediate")
+        void returnsWaypointAlternatesAndExcludesPrimaryIntermediate() {
+            String callsign = "WPALT1";
+            FlightPlan plan = waypointPlan(callsign);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("DEPA", 0.0, 0.0, "fix"),
+                    new GeoPoint("DSTA", 0.0, 10.0, "fix"),
+                    new GeoPoint("MIDP", 0.0, 5.0, "fix"),
+
+                    // Closest candidates to the A->B corridor (lat ~= 0.0)
+                    new GeoPoint("CAND", 0.10, 5.0, "fix"),  // ~11 km
+                    new GeoPoint("DAND", -0.25, 7.0, "fix"), // ~28 km
+
+                    // Far away candidate
+                    new GeoPoint("FARL", 5.0, 5.0, "fix")
+            ));
+
+            List<FlightRoute> alternates = service.resolveWaypointAlternateRoutes(callsign, 5);
+
+            assertThat(alternates).isNotNull();
+            assertThat(alternates.size()).isGreaterThan(0);
+
+            // Best candidate should be the closest one.
+            FlightRoute first = alternates.get(0);
+            assertThat(first.getRoutePoints()).hasSize(3);
+            assertThat(first.getPolyline()).hasSize(3);
+            assertThat(first.getRoutePoints().get(1).getName()).isEqualTo("CAND");
+
+            // Ensure primary intermediate isn't returned as an "alternate".
+            boolean includesMidp = alternates.stream()
+                    .anyMatch(r -> r.getRoutePoints() != null && r.getRoutePoints().stream()
+                            .anyMatch(p -> "MIDP".equals(p.getName())));
+            assertThat(includesMidp).isFalse();
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────
 
     private FlightPlan buildSia200() {
@@ -698,6 +742,43 @@ class FlightServiceTest {
         e4.setAirway("DCT");
 
         route.setRouteElement(new ArrayList<>(List.of(e1, e2, e3, e4)));
+        fp.setFiledRoute(route);
+        return fp;
+    }
+
+    private FlightPlan waypointPlan(String callsign) {
+        FlightPlan fp = new FlightPlan();
+        fp.setId("wp-alt-plan");
+        fp.setAircraftIdentification(callsign);
+        fp.setMessageType("FPL");
+        fp.setFlightType("M");
+
+        FlightPlan.Departure dep = new FlightPlan.Departure();
+        dep.setDepartureAerodrome("DEPA");
+        fp.setDeparture(dep);
+
+        FlightPlan.Arrival arr = new FlightPlan.Arrival();
+        arr.setDestinationAerodrome("DSTA");
+        fp.setArrival(arr);
+
+        FlightPlan.Aircraft ac = new FlightPlan.Aircraft();
+        ac.setAircraftType("A359");
+        fp.setAircraft(ac);
+
+        // Primary is A -> MIDP -> B
+        FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+        FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+        el.setSeqNum(1);
+
+        FlightPlan.Position pos = new FlightPlan.Position();
+        pos.setDesignatedPoint("MIDP");
+        pos.setLat(0.0);
+        pos.setLon(5.0);
+        el.setPosition(pos);
+        el.setAirway("DCT");
+
+        // resolveRoute() sorts the routeElement list in-place, so this must be mutable.
+        route.setRouteElement(new ArrayList<>(List.of(el)));
         fp.setFiledRoute(route);
         return fp;
     }

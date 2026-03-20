@@ -215,6 +215,188 @@ public class FlightService {
         ));
     }
 
+    /**
+     * City-to-city waypoint alternates:
+     * - Take the primary route A->B endpoints
+     * - Find up to {@code limit} fixes/waypoints closest to the A->B corridor
+     * - Return routes of the form A -> C -> B
+     *
+     * This is a best-effort heuristic (no graph routing) intended for demo/interview use.
+     */
+    public List<FlightRoute> resolveWaypointAlternateRoutes(String callsign, int limit) {
+        Optional<FlightRoute> primaryOpt = resolveRoute(callsign);
+        if (primaryOpt.isEmpty()) return Collections.emptyList();
+
+        FlightRoute primary = primaryOpt.get();
+        List<double[]> primaryLine = primary.getPolyline();
+        if (primaryLine == null || primaryLine.size() < 2) return Collections.emptyList();
+
+        double[] a = primaryLine.get(0);
+        double[] b = primaryLine.get(primaryLine.size() - 1);
+        if (a == null || b == null || a.length < 2 || b.length < 2) return Collections.emptyList();
+
+        // Exclude points already used by the primary route to keep alternates distinct.
+        Set<String> primaryPointNames = primary.getRoutePoints() == null
+                ? Set.of()
+                : primary.getRoutePoints().stream()
+                    .map(FlightRoute.RoutePoint::getName)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+
+        // Heuristic threshold expansion until we have enough options.
+        double thresholdKm = 250.0;
+        double maxThresholdKm = 2000.0;
+        List<Candidate> candidates = Collections.emptyList();
+        while (thresholdKm <= maxThresholdKm) {
+            candidates = findWaypointCandidates(primary, a, b, primaryPointNames, thresholdKm, limit);
+            if (candidates.size() >= limit) break;
+            thresholdKm *= 1.5;
+        }
+
+        if (candidates.isEmpty()) return Collections.emptyList();
+
+        return candidates.stream()
+                .sorted(Comparator.comparingDouble((Candidate c) -> c.distanceKm)
+                        .thenComparingDouble(c -> c.tAlong))
+                .limit(limit)
+                .map(c -> buildWaypointAlternate(primary, c.fix))
+                .collect(Collectors.toList());
+    }
+
+    private static class Candidate {
+        private final GeoPoint fix;
+        private final double distanceKm;
+        private final double tAlong; // 0..1 projection along A->B
+
+        private Candidate(GeoPoint fix, double distanceKm, double tAlong) {
+            this.fix = fix;
+            this.distanceKm = distanceKm;
+            this.tAlong = tAlong;
+        }
+    }
+
+    private List<Candidate> findWaypointCandidates(
+            FlightRoute primary,
+            double[] a,
+            double[] b,
+            Set<String> primaryPointNames,
+            double thresholdKm,
+            int limit
+    ) {
+        List<GeoPoint> fixes = getFixes();
+        if (fixes == null || fixes.isEmpty()) return Collections.emptyList();
+
+        List<Candidate> out = new ArrayList<>();
+        for (GeoPoint fix : fixes) {
+            if (fix == null || fix.getName() == null) continue;
+            if (primaryPointNames.contains(fix.getName())) continue; // avoid primary duplicate
+
+            double lat = fix.getLat();
+            double lon = fix.getLon();
+            if (Double.isNaN(lat) || Double.isNaN(lon)) continue;
+            if (Math.abs(lat) > 85.0 || Math.abs(lon) > 180.0) continue;
+
+            PointToSegmentKm d = distancePointToSegmentKm(lat, lon, a[0], a[1], b[0], b[1]);
+            if (d.distanceKm <= thresholdKm) {
+                out.add(new Candidate(fix, d.distanceKm, d.tAlong));
+            }
+            // Small early exit: if we already have plenty, don't scan full cache endlessly.
+            if (out.size() > limit * 6) break;
+        }
+
+        out.sort(Comparator
+                .comparingDouble((Candidate c) -> c.distanceKm)
+                .thenComparingDouble(c -> c.tAlong));
+
+        return out.stream().limit(limit).collect(Collectors.toList());
+    }
+
+    private static class PointToSegmentKm {
+        private final double distanceKm;
+        private final double tAlong;
+
+        private PointToSegmentKm(double distanceKm, double tAlong) {
+            this.distanceKm = distanceKm;
+            this.tAlong = tAlong;
+        }
+    }
+
+    /**
+     * Compute planar approximation distance from point P to segment AB.
+     * Returns both distanceKm and tAlong in [0,1].
+     */
+    private PointToSegmentKm distancePointToSegmentKm(
+            double pLat,
+            double pLon,
+            double aLat,
+            double aLon,
+            double bLat,
+            double bLon
+    ) {
+        // Convert degrees -> km using local scaling at the segment's mid latitude.
+        double midLatRad = Math.toRadians((aLat + bLat) / 2.0);
+        double kmPerDegLat = 111.32;
+        double kmPerDegLon = 111.32 * Math.cos(midLatRad);
+
+        // 2D vectors in km
+        double ax = aLon * kmPerDegLon;
+        double ay = aLat * kmPerDegLat;
+        double bx = bLon * kmPerDegLon;
+        double by = bLat * kmPerDegLat;
+        double px = pLon * kmPerDegLon;
+        double py = pLat * kmPerDegLat;
+
+        double abx = bx - ax;
+        double aby = by - ay;
+        double apx = px - ax;
+        double apy = py - ay;
+
+        double ab2 = abx * abx + aby * aby;
+        double t = ab2 < 1e-12 ? 0.0 : (apx * abx + apy * aby) / ab2;
+        t = Math.max(0.0, Math.min(1.0, t));
+
+        double cx = ax + t * abx;
+        double cy = ay + t * aby;
+
+        double dx = px - cx;
+        double dy = py - cy;
+        double dist = Math.sqrt(dx * dx + dy * dy);
+        return new PointToSegmentKm(dist, t);
+    }
+
+    private FlightRoute buildWaypointAlternate(FlightRoute primary, GeoPoint waypointFix) {
+        double[] a = primary.getPolyline().get(0);
+        double[] b = primary.getPolyline().get(primary.getPolyline().size() - 1);
+
+        String dep = primary.getDepartureAerodrome();
+        String dest = primary.getDestinationAerodrome();
+        String wpName = waypointFix.getName();
+
+        String wpType = determinePointType(wpName);
+
+        List<FlightRoute.RoutePoint> routePoints = List.of(
+                new FlightRoute.RoutePoint(dep, a[0], a[1], "airport", 0),
+                new FlightRoute.RoutePoint(wpName, waypointFix.getLat(), waypointFix.getLon(), wpType, 1),
+                new FlightRoute.RoutePoint(dest, b[0], b[1], "airport", 999)
+        );
+
+        List<double[]> polyline = List.of(
+                new double[]{a[0], a[1]},
+                new double[]{waypointFix.getLat(), waypointFix.getLon()},
+                new double[]{b[0], b[1]}
+        );
+
+        return new FlightRoute(
+                primary.getCallsign(),
+                primary.getDepartureAerodrome(),
+                primary.getDestinationAerodrome(),
+                primary.getAircraftType(),
+                primary.getFlightType(),
+                routePoints,
+                polyline
+        );
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private Map<String, GeoPoint> buildFixMap() {

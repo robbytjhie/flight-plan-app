@@ -14,6 +14,8 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -179,6 +181,35 @@ public class FlightController {
         return flightService.resolveAlternateRoute(safe)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * GET /api/route/{callsign}/alternate/waypoints
+     * Returns up to N waypoint-based A->C->B alternates (heuristic, corridor-based).
+     */
+    @Operation(
+            summary = "Resolve waypoint-based city-to-city alternates",
+            description = "Returns up to N alternate routes built as A -> C -> B using fixes/waypoints near the A->B corridor.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "List of waypoint alternate routes",
+                    content = @Content(array = @ArraySchema(schema = @Schema(implementation = FlightRoute.class)))),
+            @ApiResponse(responseCode = "400", description = "Invalid callsign or limit", content = @Content)
+    })
+    @GetMapping("/route/{callsign}/alternate/waypoints")
+    public ResponseEntity<List<FlightRoute>> getWaypointAlternateRoutes(
+            @PathVariable
+            @NotBlank
+            @Size(max = 8)
+            String callsign,
+            @RequestParam(defaultValue = "5")
+            @Min(1)
+            @Max(5)
+            int limit
+    ) {
+        String safe = inputSanitiser.sanitiseCallsign(callsign);
+        log.debug("GET /api/route/{callsign}/alternate/waypoints (sanitised) limit={}", limit);
+
+        return ResponseEntity.ok(flightService.resolveWaypointAlternateRoutes(safe, limit));
     }
 
     @Operation(summary = "List all airways geopoints", description = "Returns all airway geopoints from the cache.")

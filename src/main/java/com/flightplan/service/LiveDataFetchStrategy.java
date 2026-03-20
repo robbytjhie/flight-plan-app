@@ -1,6 +1,7 @@
 package com.flightplan.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.flightplan.model.FlightPlan;
 import com.flightplan.model.GeoPoint;
 import lombok.RequiredArgsConstructor;
@@ -11,11 +12,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
-import java.util.stream.Collectors;
+import java.time.Duration;
 
 /**
  * PROD profile implementation of {@link DataFetchStrategy}.
@@ -46,6 +45,8 @@ public class LiveDataFetchStrategy implements DataFetchStrategy {
 
     private final WebClient flightApiWebClient;
 
+    private static final Duration UPSTREAM_TIMEOUT = Duration.ofSeconds(45);
+
     private static final String PATH_FLIGHT_PLANS = "/flight-manager/displayAll";
     private static final String PATH_AIRWAYS      = "/geopoints/list/airways";
     private static final String PATH_FIXES        = "/geopoints/list/fixes";
@@ -58,6 +59,7 @@ public class LiveDataFetchStrategy implements DataFetchStrategy {
                 .retrieve()
                 .bodyToFlux(FlightPlan.class)
                 .collectList()
+                .timeout(UPSTREAM_TIMEOUT)
                 .onErrorResume(e -> {
                     log.error("[FETCH][prod] Flight plans call failed — returning empty list. Error: {}",
                             e.getMessage());
@@ -82,36 +84,65 @@ public class LiveDataFetchStrategy implements DataFetchStrategy {
     private List<GeoPoint> fetchGeoPoints(String path, String type) {
         log.info("[FETCH][prod] GET {}", path);
 
-        String[] rawArray = flightApiWebClient.get()
+        String raw = flightApiWebClient.get()
                 .uri(path)
                 .retrieve()
                 .bodyToMono(String.class)
-                .map(raw -> {
-                    try {
-                        return objectMapper.readValue(raw, String[].class);
-                    } catch (Exception e) {
-                        log.error("[FETCH][prod] Failed to parse airways response: {}", e.getMessage());
-                        return new String[0];
-                    }
-                })
+                .timeout(UPSTREAM_TIMEOUT)
                 .onErrorResume(e -> {
                     log.error("[FETCH][prod] Geopoints call failed for {} — returning empty list. Error: {}",
                             path, e.getMessage());
-                    return Mono.just(new String[0]);
+                    return Mono.just("[]");
                 })
                 .block();
 
-        if (rawArray == null || rawArray.length == 0) {
+        if (raw == null || raw.isBlank()) {
             log.warn("[FETCH][prod] Empty response from {}", path);
             return Collections.emptyList();
         }
 
-        List<GeoPoint> parsed = Arrays.stream(rawArray)
-                .map(s -> GeoPoint.parse(s, type))
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-
+        List<GeoPoint> parsed = parseGeopointsPayload(raw, type);
         log.info("[FETCH][prod] Parsed {} {} geopoints", parsed.size(), type);
         return parsed;
+    }
+
+    private List<GeoPoint> parseGeopointsPayload(String raw, String type) {
+        try {
+            JsonNode root = objectMapper.readTree(raw);
+            if (root == null || root.isNull()) return Collections.emptyList();
+
+            // Sometimes upstream wraps arrays in an object.
+            if (root.isObject()) {
+                for (String candidateKey : List.of("data", "items", "geopoints")) {
+                    JsonNode maybe = root.get(candidateKey);
+                    if (maybe != null && maybe.isArray()) {
+                        root = maybe;
+                        break;
+                    }
+                }
+            }
+
+            if (!root.isArray()) return Collections.emptyList();
+
+            // Best-effort parsing: handle both legacy string arrays and JSON object arrays.
+            List<GeoPoint> out = new java.util.ArrayList<>();
+            for (JsonNode el : root) {
+                if (el == null || el.isNull()) continue;
+
+                GeoPoint gp = null;
+                if (el.isTextual()) {
+                    gp = GeoPoint.parse(el.asText(), type);
+                } else if (el.isObject()) {
+                    gp = GeoPoint.fromJsonObject(el, type);
+                }
+
+                if (gp != null) out.add(gp);
+            }
+            return out;
+        } catch (Exception e) {
+            log.error("[FETCH][prod] Failed to parse geopoints payload for type={} — returning empty list. Error: {}",
+                    type, e.getMessage());
+            return Collections.emptyList();
+        }
     }
 }

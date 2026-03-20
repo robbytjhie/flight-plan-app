@@ -310,6 +310,35 @@ class FlightControllerTest {
         }
     }
 
+    // ── GET /api/route/{callsign}/alternate/waypoints ─────────────────
+
+    @Nested @DisplayName("GET /api/route/{callsign}/alternate/waypoints")
+    class GetWaypointAlternateRoutesTests {
+
+        @Test @DisplayName("200 with waypoint alternate routes list")
+        void returns200WithWaypointAlternates() throws Exception {
+            when(flightService.resolveWaypointAlternateRoutes("SIA200", 5))
+                    .thenReturn(List.of(sia200Route));
+
+            mockMvc.perform(get("/api/route/SIA200/alternate/waypoints").param("limit", "5"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$", hasSize(1)))
+                    .andExpect(jsonPath("$[0].callsign").value("SIA200"));
+        }
+
+        @Test @DisplayName("400 for limit out of range (IM8 query validation)")
+        void rejects400ForLimitOutOfRange() throws Exception {
+            mockMvc.perform(get("/api/route/SIA200/alternate/waypoints").param("limit", "0"))
+                    .andExpect(status().isBadRequest());
+        }
+
+        @Test @DisplayName("IM8 S6: 400 for XSS payload in waypoints route path variable")
+        void rejects400ForXssInWaypointAlternatePath() throws Exception {
+            mockMvc.perform(get("/api/route/<img src=x>/alternate/waypoints"))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
     // ── GET /api/geopoints/airways ───────────────────────────────────
 
     @Nested @DisplayName("GET /api/geopoints/airways")
