@@ -21,19 +21,19 @@ import java.util.stream.Collectors;
  *
  * ── Fix map caching ──────────────────────────────────────────────────────────
  * buildFixMap() merges 247 000+ fixes and 9 000+ airways into a single HashMap
- * for O(1) waypoint lookups during route resolution. Building that map is cheap
- * in CPU terms (~5 ms) but allocates ~30 MB of short-lived objects on every call.
+ * for O(1) waypoint lookups during route resolution. The map is rebuilt at most
+ * once per 10-minute leader-refresh cycle regardless of request volume.
  *
- * Previously the map was rebuilt on every resolveRoute() call — once per callsign
- * lookup, for every concurrent request. Under load (89 flights × concurrent users)
- * this caused repeated GC pressure with no benefit because the underlying data
- * only changes when the leader refreshes the cache (default every 10 minutes).
+ * ── Name-only airways and coordinate guards ──────────────────────────────────
+ * The upstream /geopoints/list/airways endpoint returns plain name strings with
+ * no coordinates (e.g. "W218", "UA401"). GeoPoint.parse() stores these as
+ * lat=0, lon=0 so name-based lookups still work for route identification.
  *
- * The cached fix map is keyed on the cache's lastRefreshed timestamp. On each
- * resolveRoute() call we compare the current lastRefreshed to the snapshot's
- * timestamp — if they match, the cached map is reused; if not (leader has refreshed),
- * the map is rebuilt exactly once and stored. This means the 247K-entry merge
- * happens at most once per 10-minute refresh window regardless of request volume.
+ * However, (0,0) is a real point in the Gulf of Guinea — if these zero-coord
+ * entries leak into polyline drawing they produce spurious lines across the map.
+ * All four coordinate-lookup sites in resolveRoute() guard against this with
+ * hasValidCoords(), which treats (0,0) as "no coordinates available" and skips
+ * the point from the drawn route while still recognising the name.
  */
 @Service
 @Slf4j
@@ -93,7 +93,7 @@ public class FlightService {
                 ? plan.getDeparture().getDepartureAerodrome() : null;
         if (depIcao != null) {
             GeoPoint depGeo = fixMap.get(depIcao);
-            if (depGeo != null) {
+            if (hasValidCoords(depGeo)) {
                 routePoints.add(new FlightRoute.RoutePoint(depIcao, depGeo.getLat(),
                         depGeo.getLon(), "airport", 0));
                 polyline.add(new double[]{depGeo.getLat(), depGeo.getLon()});
@@ -114,10 +114,12 @@ public class FlightService {
 
                 if (pos.getLat() != null && pos.getLon() != null
                         && (pos.getLat() != 0.0 || pos.getLon() != 0.0)) {
+                    // Inline coords from the flight plan — use directly
                     lat = pos.getLat();
                     lon = pos.getLon();
                 } else if (pointName != null && fixMap.containsKey(pointName)) {
                     GeoPoint gp = fixMap.get(pointName);
+                    if (!hasValidCoords(gp)) continue; // name-only airway — skip from polyline
                     lat = gp.getLat();
                     lon = gp.getLon();
                 } else {
@@ -128,12 +130,13 @@ public class FlightService {
                 routePoints.add(new FlightRoute.RoutePoint(pointName, lat, lon, type, el.getSeqNum()));
                 polyline.add(new double[]{lat, lon});
 
+                // Airway reference point — only add to polyline if it has real coords
                 String airwayName = el.getAirway();
                 if (airwayName != null && !airwayName.isBlank()) {
                     String aw = airwayName.trim().toUpperCase(Locale.ROOT);
                     if (!"DCT".equals(aw)) {
                         GeoPoint airwayGp = fixMap.get(aw);
-                        if (airwayGp != null) {
+                        if (hasValidCoords(airwayGp)) {
                             routePoints.add(new FlightRoute.RoutePoint(
                                     aw, airwayGp.getLat(), airwayGp.getLon(), "airway", el.getSeqNum()
                             ));
@@ -150,7 +153,7 @@ public class FlightService {
         if (destIcao != null && (routePoints.isEmpty() ||
                 !destIcao.equals(routePoints.get(routePoints.size() - 1).getName()))) {
             GeoPoint destGeo = fixMap.get(destIcao);
-            if (destGeo != null) {
+            if (hasValidCoords(destGeo)) {
                 routePoints.add(new FlightRoute.RoutePoint(destIcao, destGeo.getLat(),
                         destGeo.getLon(), "airport", 999));
                 polyline.add(new double[]{destGeo.getLat(), destGeo.getLon()});
@@ -222,14 +225,6 @@ public class FlightService {
 
     // ── Fix map caching ───────────────────────────────────────────────────────
 
-    /**
-     * Returns a pre-built name → GeoPoint lookup map, rebuilt only when the
-     * underlying cache has been refreshed by the leader pod.
-     *
-     * Thread safety: AtomicReference.compareAndSet ensures only one thread
-     * rebuilds the map per refresh cycle. Concurrent threads that lose the CAS
-     * race simply re-read the freshly set snapshot on their next get().
-     */
     private Map<String, GeoPoint> getCachedFixMap() {
         Instant currentRefresh = flightDataCache.getLastRefreshed();
         FixMapSnapshot snapshot = fixMapSnapshot.get();
@@ -238,12 +233,8 @@ public class FlightService {
             return snapshot.fixMap();
         }
 
-        // Cache has been refreshed (or this is the first call) — rebuild.
         Map<String, GeoPoint> fresh = buildFixMap();
         FixMapSnapshot next = new FixMapSnapshot(currentRefresh, fresh);
-
-        // CAS: if another thread already updated the snapshot, that's fine — both
-        // results are identical for the same refresh timestamp.
         fixMapSnapshot.compareAndSet(snapshot, next);
 
         log.debug("[FIXMAP] Rebuilt fix map: {} entries (lastRefreshed={})",
@@ -259,6 +250,19 @@ public class FlightService {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Returns true only if the GeoPoint has real drawable coordinates.
+     *
+     * Name-only airways (parsed from the upstream list with no coordinate data)
+     * are stored as lat=0, lon=0. Since (0,0) is a real geographic point in the
+     * Gulf of Guinea, using it as a polyline vertex produces bogus lines across
+     * the map. We treat exactly (0,0) as "no coords available" and skip it from
+     * route drawing — the name is still in the fix map for identification purposes.
+     */
+    private boolean hasValidCoords(GeoPoint gp) {
+        return gp != null && (gp.getLat() != 0.0 || gp.getLon() != 0.0);
+    }
 
     private String determinePointType(String name) {
         if (name != null && name.length() == 4 && name.matches("[A-Z]{4}")) return "airport";
@@ -283,9 +287,5 @@ public class FlightService {
         return x;
     }
 
-    /**
-     * Immutable snapshot pairing a pre-built fix map to the cache timestamp
-     * it was built from. Records are a natural fit — equality is by value.
-     */
     private record FixMapSnapshot(Instant builtAt, Map<String, GeoPoint> fixMap) {}
 }

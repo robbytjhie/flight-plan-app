@@ -254,6 +254,109 @@ class FlightServiceTest {
             assertThat(service.resolveRoute("SIA200")).isPresent();
         }
 
+        @Test @DisplayName("name-only airway in fix map (lat=0,lon=0) is skipped from polyline — no Gulf of Guinea lines")
+        void nameOnlyAirwaySkippedFromPolyline() {
+            // UA401 exists in the airways list as name-only (lat=0, lon=0).
+            // It must NOT appear as a polyline vertex — that would draw a line to the Gulf of Guinea.
+            FlightPlan plan = buildSia200();
+            // Add a route element whose airway field is a name-only entry
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("PARDI");
+            pos.setLat(1.10);
+            pos.setLon(104.20);
+            el.setPosition(pos);
+            el.setAirway("UA401");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            // UA401 is a name-only airway — stored with lat=0, lon=0
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("UA401", 0.0, 0.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+
+            // UA401 must not appear in the polyline
+            boolean zeroZeroInPolyline = route.getPolyline().stream()
+                    .anyMatch(p -> p[0] == 0.0 && p[1] == 0.0);
+            assertThat(zeroZeroInPolyline)
+                    .as("(0,0) must not appear in polyline — name-only airway should be skipped")
+                    .isFalse();
+
+            // UA401 must not appear in routePoints either
+            boolean ua401InPoints = route.getRoutePoints().stream()
+                    .anyMatch(p -> "UA401".equals(p.getName()));
+            assertThat(ua401InPoints)
+                    .as("name-only airway UA401 must not appear as a route point")
+                    .isFalse();
+        }
+
+        @Test @DisplayName("waypoint with (0,0) in fix map is skipped from polyline")
+        void waypointWithZeroCoordsInFixMapSkipped() {
+            // If a waypoint name resolves to a name-only entry (0,0) in the fix map,
+            // it must be skipped — not drawn as a Gulf of Guinea point.
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("NOCOORD");
+            pos.setLat(0.0); // no inline coords
+            pos.setLon(0.0);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            // NOCOORD is in the fix map but with (0,0) — name-only
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("NOCOORD", 0.0, 0.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+
+            boolean zeroZeroInPolyline = route.getPolyline().stream()
+                    .anyMatch(p -> p[0] == 0.0 && p[1] == 0.0);
+            assertThat(zeroZeroInPolyline)
+                    .as("(0,0) must not appear in polyline")
+                    .isFalse();
+        }
+
+        @Test @DisplayName("airway with real coords is still added to polyline")
+        void airwayWithRealCoordsAddedToPolyline() {
+            // Confirm the guard does not accidentally skip airways that DO have coordinates
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("PARDI");
+            pos.setLat(1.10);
+            pos.setLon(104.20);
+            el.setPosition(pos);
+            el.setAirway("M771"); // has real coords
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M771", 3.15, 101.70, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+
+            boolean m771InPoints = route.getRoutePoints().stream()
+                    .anyMatch(p -> "M771".equals(p.getName()));
+            assertThat(m771InPoints)
+                    .as("airway M771 with real coords should appear in route points")
+                    .isTrue();
+        }
+
         @Test @DisplayName("handles null filedRoute gracefully")
         void handlesNullFiledRoute() {
             FlightPlan plan = buildSia200();
