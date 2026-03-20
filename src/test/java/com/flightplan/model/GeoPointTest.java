@@ -163,15 +163,25 @@ class GeoPointTest {
         }
 
         @Test
-        @DisplayName("returns null when opening parenthesis is missing")
-        void returnsNullMissingOpenParen() {
-            assertThat(GeoPoint.parse("WSSS 1.36,103.99)", "fix")).isNull();
+        @DisplayName("missing open paren falls through to name-only path — returns GeoPoint with lat/lon 0")
+        void missingOpenParenFallsToNameOnly() {
+            // No '(' found — name-only branch fires; whole string becomes the name
+            GeoPoint gp = GeoPoint.parse("WSSS 1.36,103.99)", "fix");
+            assertThat(gp).isNotNull();
+            assertThat(gp.getName()).isEqualTo("WSSS 1.36,103.99)");
+            assertThat(gp.getLat()).isZero();
+            assertThat(gp.getLon()).isZero();
         }
 
         @Test
-        @DisplayName("returns null when closing parenthesis is missing")
-        void returnsNullMissingCloseParen() {
-            assertThat(GeoPoint.parse("WSSS (1.36,103.99", "fix")).isNull();
+        @DisplayName("missing close paren falls through to name-only path — returns GeoPoint with lat/lon 0")
+        void missingCloseParenFallsToNameOnly() {
+            // '(' exists but ')' is absent — parenClose < parenOpen so name-only branch fires
+            GeoPoint gp = GeoPoint.parse("WSSS (1.36,103.99", "fix");
+            assertThat(gp).isNotNull();
+            assertThat(gp.getName()).isEqualTo("WSSS (1.36,103.99");
+            assertThat(gp.getLat()).isZero();
+            assertThat(gp.getLon()).isZero();
         }
 
         @Test
