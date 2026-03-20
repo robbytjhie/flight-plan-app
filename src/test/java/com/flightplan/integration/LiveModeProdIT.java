@@ -172,37 +172,46 @@ class LiveModeProdIT {
                 .andExpect(jsonPath("$", empty()));
     }
 
-    @Test @DisplayName("fetches airways from stubbed live API")
+    @Test @DisplayName("fetches airways from stubbed live API — verified via cache/status count")
     void fetchesAirwaysFromLiveApi() throws Exception {
+        // /api/geopoints/** is blocked externally (internal-only).
+        // Verify the live fetch strategy correctly parsed and stored the airways
+        // by checking airwaysCount in /api/cache/status.
         stubAllAndRefresh(
                 "[]",
                 "[\"A576 (1.50,104.10)\",\"M635 (-1.20,106.50)\"]",
                 "[]"
         );
 
-        mockMvc.perform(get("/api/geopoints/airways"))
+        mockMvc.perform(get("/api/cache/status"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(2)))
-                .andExpect(jsonPath("$[0].name").value("A576"))
-                .andExpect(jsonPath("$[1].name").value("M635"));
+                .andExpect(jsonPath("$.airwaysCount").value(2));
     }
 
-    @Test @DisplayName("fetches fixes from stubbed live API with type=fix")
+    @Test @DisplayName("fetches fixes from stubbed live API — verified via cache/status and route resolution")
     void fetchesFixesFromLiveApi() throws Exception {
+        // Verify fixes were correctly fetched and parsed by checking fixesCount,
+        // then confirm coordinates are resolvable by requesting a route whose
+        // departure airport (WSSS) is in the fixes list.
         stubAllAndRefresh(
-                "[]",
+                flightPlanArrayJson("EK500", "WSSS", "YSSY", "A388"),
                 "[]",
                 "[\"WSSS (1.3644,103.9915)\",\"YSSY (-33.9461,151.1772)\"]"
         );
 
-        mockMvc.perform(get("/api/geopoints/fixes"))
+        mockMvc.perform(get("/api/cache/status"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(2)))
-                .andExpect(jsonPath("$[0].name").value("WSSS"))
-                .andExpect(jsonPath("$[0].type").value("fix"));
+                .andExpect(jsonPath("$.fixesCount").value(2));
+
+        // Route resolution uses the fix map internally — WSSS coords prove fixes loaded correctly.
+        mockMvc.perform(get("/api/route/EK500"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.routePoints[0].name").value("WSSS"))
+                .andExpect(jsonPath("$.routePoints[0].lat").value(1.3644))
+                .andExpect(jsonPath("$.routePoints[0].lon").value(103.9915));
     }
 
-    @Test @DisplayName("airways endpoint returns empty list when API is down (503)")
+    @Test @DisplayName("airwaysCount is 0 in cache/status when upstream airways API is down (503)")
     void airwaysEmptyWhenApiDown() throws Exception {
         wireMock.stubFor(WireMock.get(urlEqualTo("/flight-manager/displayAll"))
                 .willReturn(aResponse().withHeader("Content-Type", "application/json").withBody("[]")));
@@ -212,12 +221,12 @@ class LiveModeProdIT {
                 .willReturn(aResponse().withHeader("Content-Type", "application/json").withBody("[]")));
         flightDataCache.refreshIfLeader();
 
-        mockMvc.perform(get("/api/geopoints/airways"))
+        mockMvc.perform(get("/api/cache/status"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", empty()));
+                .andExpect(jsonPath("$.airwaysCount").value(0));
     }
 
-    @Test @DisplayName("fixes endpoint returns empty list when API is down (503)")
+    @Test @DisplayName("fixesCount is 0 in cache/status when upstream fixes API is down (503)")
     void fixesEmptyWhenApiDown() throws Exception {
         wireMock.stubFor(WireMock.get(urlEqualTo("/flight-manager/displayAll"))
                 .willReturn(aResponse().withHeader("Content-Type", "application/json").withBody("[]")));
@@ -227,9 +236,9 @@ class LiveModeProdIT {
                 .willReturn(aResponse().withStatus(503)));
         flightDataCache.refreshIfLeader();
 
-        mockMvc.perform(get("/api/geopoints/fixes"))
+        mockMvc.perform(get("/api/cache/status"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", empty()));
+                .andExpect(jsonPath("$.fixesCount").value(0));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
