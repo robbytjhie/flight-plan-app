@@ -310,51 +310,55 @@ class FlightControllerTest {
         }
     }
 
-    // ── GET /api/geopoints/airways ───────────────────────────────────
+    // ── GET /api/geopoints/** (internal — blocked externally, hidden from Swagger) ──
 
-    @Nested @DisplayName("GET /api/geopoints/airways")
-    class GetAirwaysTests {
+    @Nested @DisplayName("GET /api/geopoints/** (internal endpoints)")
 
-        @Test @DisplayName("200 with airways list")
-        void returns200WithAirways() throws Exception {
-            when(flightService.getAirways()).thenReturn(List.of(
-                    new GeoPoint("A576", 1.5, 104.1, "airway"),
-                    new GeoPoint("M635", -1.2, 106.5, "airway")
-            ));
+    class GeopointsTests {
+
+
+
+        @Test @DisplayName("403 for /api/geopoints/airways — blocked by SecurityConfig")
+
+        void airwaysBlockedExternally() throws Exception {
+
+            // SecurityConfig .requestMatchers("/api/geopoints/**").denyAll() means
+
+            // external callers always receive 403 regardless of service state.
+
             mockMvc.perform(get("/api/geopoints/airways"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$", hasSize(2)))
-                    .andExpect(jsonPath("$[0].name").value("A576"))
-                    .andExpect(jsonPath("$[0].type").value("airway"));
+
+                    .andExpect(status().isForbidden());
+
         }
 
-        @Test @DisplayName("200 with empty list when no airways in cache")
-        void returns200Empty() throws Exception {
-            when(flightService.getAirways()).thenReturn(List.of());
-            mockMvc.perform(get("/api/geopoints/airways"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$", hasSize(0)));
-        }
-    }
 
-    // ── GET /api/geopoints/fixes ─────────────────────────────────────
 
-    @Nested @DisplayName("GET /api/geopoints/fixes")
-    class GetFixesTests {
+        @Test @DisplayName("403 for /api/geopoints/fixes — blocked by SecurityConfig")
 
-        @Test @DisplayName("200 with fixes and correct fields")
-        void returns200WithFixes() throws Exception {
-            when(flightService.getFixes()).thenReturn(List.of(
-                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix")
-            ));
+        void fixesBlockedExternally() throws Exception {
+
             mockMvc.perform(get("/api/geopoints/fixes"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$[0].name").value("WSSS"))
-                    .andExpect(jsonPath("$[0].lat").value(1.3644))
-                    .andExpect(jsonPath("$[0].lon").value(103.9915))
-                    .andExpect(jsonPath("$[0].type").value("fix"));
+
+                    .andExpect(status().isForbidden());
+
         }
+
+
+
+        @Test @DisplayName("403 for any /api/geopoints/** sub-path")
+
+        void anyGeopointsSubpathBlocked() throws Exception {
+
+            mockMvc.perform(get("/api/geopoints/anything"))
+
+                    .andExpect(status().isForbidden());
+
+        }
+
     }
+
+
 
     // ── GET /api/health ──────────────────────────────────────────────
 
