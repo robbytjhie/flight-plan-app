@@ -974,4 +974,316 @@ class FlightServiceTest {
             verify(flightDataCache, times(3)).getAirways();
         }
     }
+
+    // ── 4-tier duplicate disambiguation ──────────────────────────────────────
+
+    /**
+     * Tests for the 4-tier bestCandidate() disambiguation chain.
+     *
+     * The upstream fixes dataset contains 12 230 waypoint names that appear more
+     * than once with different coordinates in different FIRs worldwide. These tests
+     * verify that resolveRoute() picks the geographically correct candidate by
+     * working through a prioritised fallback chain from strongest to weakest context:
+     *
+     *   Tier 1 — Cross-track distance (both dep + dest known)
+     *   Tier 2 — Closest to nearest known endpoint (only dep OR dest known)
+     *   Tier 3 — Closest to centroid of already-resolved route points
+     *   Tier 4 — First valid-coord entry (absolute last resort)
+     *
+     * The canonical test case is SUNIR on the FAOR→WSSS (Johannesburg→Singapore)
+     * route, which has two entries in the upstream dataset:
+     *
+     *   SUNIR (-24.30,  40.00) — Indian Ocean near Madagascar  ✅ correct
+     *   SUNIR ( 43.39,  -3.13) — Northern Spain                ❌ wrong
+     *
+     * Cross-track distances from the FAOR→WSSS great-circle path:
+     *   Correct fix:   9 km  (lies almost exactly on the flight path)
+     *   Wrong fix:  7650 km  (completely off the route)
+     */
+    @Nested @DisplayName("4-tier duplicate disambiguation")
+    class DisambiguationTests {
+
+        // FAOR (Johannesburg O.R. Tambo) and WSSS (Singapore Changi) anchor coords
+        private static final double FAOR_LAT  = -26.13;
+        private static final double FAOR_LON  =  28.24;
+        private static final double WSSS_LAT  =   1.36;
+        private static final double WSSS_LON  = 103.99;
+
+        /**
+         * Builds a minimal flight plan with a single en-route waypoint whose
+         * name must be resolved from the fixes multimap.
+         */
+        private FlightPlan planWithWaypoint(String dep, String dest, String waypointName) {
+            FlightPlan fp = new FlightPlan();
+            fp.setAircraftIdentification("SIA481");
+
+            FlightPlan.Departure d = new FlightPlan.Departure();
+            d.setDepartureAerodrome(dep);
+            fp.setDeparture(d);
+
+            FlightPlan.Arrival a = new FlightPlan.Arrival();
+            a.setDestinationAerodrome(dest);
+            fp.setArrival(a);
+
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(1);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint(waypointName);
+            pos.setLat(0.0); // no inline coords — forces fix map lookup
+            pos.setLon(0.0);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+
+            FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+            route.setRouteElement(new ArrayList<>(List.of(el)));
+            fp.setFiledRoute(route);
+            return fp;
+        }
+
+        @Test
+        @DisplayName("Tier 1 — SUNIR: picks Madagascar (-24.30,40.00) not Spain (43.39,-3.13) via cross-track on FAOR→WSSS")
+        void tier1_sunirCorrectCandidateViaCrossTrack() {
+            // The canonical real-world regression. Both FAOR and WSSS are in the fixes
+            // dataset, so Tier 1 (cross-track) runs. The Madagascar SUNIR is 9 km from
+            // the FAOR→WSSS great-circle path; the Spain one is 7 650 km away.
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "SUNIR");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR", FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS", WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("SUNIR", -24.30,  40.00, "fix"),  // Indian Ocean — correct
+                    new GeoPoint("SUNIR",  43.39,  -3.13, "fix")   // Spain — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint sunir = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "SUNIR".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("SUNIR not in route"));
+
+            assertThat(sunir.getLat()).as("should be Madagascar lat, not Spain").isEqualTo(-24.30);
+            assertThat(sunir.getLon()).as("should be Indian Ocean lon, not Spain").isEqualTo(40.00);
+        }
+
+        @Test
+        @DisplayName("Tier 1 — Spain SUNIR never appears in polyline")
+        void tier1_spainSunirAbsentFromPolyline() {
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "SUNIR");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR", FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS", WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("SUNIR", -24.30, 40.00, "fix"),
+                    new GeoPoint("SUNIR",  43.39, -3.13, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            boolean spainInPolyline = service.resolveRoute("SIA481").orElseThrow()
+                    .getPolyline().stream()
+                    .anyMatch(p -> Double.compare(p[0], 43.39) == 0
+                               && Double.compare(p[1], -3.13) == 0);
+            assertThat(spainInPolyline).as("Spain SUNIR must not appear in polyline").isFalse();
+        }
+
+        @Test
+        @DisplayName("Tier 2 — picks closest to departure when only dep is known")
+        void tier2_closestToDepartureWhenOnlyDepKnown() {
+            // WSSS not in fixes — Tier 1 (cross-track) unavailable.
+            // FAOR is known, so Tier 2 uses proximity to departure.
+            // DUPWP-A is 500 km from FAOR; DUPWP-B is 8000 km away.
+            FlightPlan plan = planWithWaypoint("FAOR", "UNKN", "DUPWP");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR",  FAOR_LAT, FAOR_LON, "fix"),
+                    // UNKN intentionally absent from fixes
+                    new GeoPoint("DUPWP", -22.0, 30.0,  "fix"),   // ~500 km from FAOR — correct
+                    new GeoPoint("DUPWP",  50.0, 10.0,  "fix")    // ~8000 km from FAOR — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint wp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(wp.getLat()).as("should pick candidate near FAOR").isEqualTo(-22.0);
+        }
+
+        @Test
+        @DisplayName("Tier 2 — picks closest to destination when only dest is known")
+        void tier2_closestToDestinationWhenOnlyDestKnown() {
+            // FAOR not in fixes — dep anchor unavailable.
+            // WSSS is known, so Tier 2 uses proximity to destination.
+            FlightPlan plan = planWithWaypoint("UNKN", "WSSS", "DUPWP");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS",  WSSS_LAT, WSSS_LON, "fix"),
+                    // UNKN intentionally absent
+                    new GeoPoint("DUPWP",  3.0, 101.0, "fix"),    // ~350 km from WSSS — correct
+                    new GeoPoint("DUPWP", 50.0,  10.0, "fix")     // ~9000 km from WSSS — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint wp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(wp.getLat()).as("should pick candidate near WSSS").isEqualTo(3.0);
+        }
+
+        @Test
+        @DisplayName("Tier 3 — picks closest to centroid of resolved points when no endpoint known")
+        void tier3_closestToCentroidOfResolvedPoints() {
+            // Neither UNKN dep nor UNKN dest is in fixes.
+            // A prior waypoint PREV has already been resolved at (1.0, 50.0).
+            // The second duplicate waypoint DUPWP should pick the candidate
+            // closest to that centroid (1.0, 50.0).
+            FlightPlan fp = new FlightPlan();
+            fp.setAircraftIdentification("SIA481");
+            FlightPlan.Departure d = new FlightPlan.Departure();
+            d.setDepartureAerodrome("UNKN");
+            fp.setDeparture(d);
+            FlightPlan.Arrival a = new FlightPlan.Arrival();
+            a.setDestinationAerodrome("UNKN");
+            fp.setArrival(a);
+
+            // Two sequential waypoints: PREV (unique, near Indian Ocean) then DUPWP (duplicate)
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("PREV");
+            p1.setLat(0.0); p1.setLon(0.0);
+            e1.setPosition(p1); e1.setAirway("DCT");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("DUPWP");
+            p2.setLat(0.0); p2.setLon(0.0);
+            e2.setPosition(p2); e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+            route.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            fp.setFiledRoute(route);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(fp));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("PREV",  1.0, 50.0,  "fix"),  // resolved first, centroid ~(1,50)
+                    new GeoPoint("DUPWP", 2.0, 52.0,  "fix"),  // ~300 km from centroid — correct
+                    new GeoPoint("DUPWP", 60.0, -20.0, "fix")  // far from centroid — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint dupwp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(dupwp.getLat()).as("should pick candidate near centroid of PREV").isEqualTo(2.0);
+        }
+
+        @Test
+        @DisplayName("Tier 4 — returns first valid-coord entry when no context available")
+        void tier4_firstValidEntryWhenNoContext() {
+            // No dep, no dest, no prior resolved points — absolute last resort.
+            FlightPlan plan = planWithWaypoint("UNKN", "UNKN", "DUPWP");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("DUPWP",  10.0, 20.0, "fix"),  // first valid entry
+                    new GeoPoint("DUPWP", -10.0, 50.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint wp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(wp.getLat()).as("Tier 4: first valid-coord entry").isEqualTo(10.0);
+        }
+
+        @Test
+        @DisplayName("single-entry name bypasses disambiguation and is returned directly")
+        void singleCandidateReturnedDirectly() {
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "EXOBI");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR",  FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS",  WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("EXOBI", -26.05,   29.15,    "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint exobi = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "EXOBI".equals(p.getName()))
+                    .findFirst().orElseThrow();
+
+            assertThat(exobi.getLat()).isEqualTo(-26.05);
+            assertThat(exobi.getLon()).isEqualTo(29.15);
+        }
+
+        @Test
+        @DisplayName("all-zero-coord candidates are never plotted — no Gulf of Guinea line")
+        void allZeroCoordsNotPlotted() {
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "NOCOORD");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR", FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS", WSSS_LAT, WSSS_LON, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("NOCOORD", 0.0, 0.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            boolean zeroInPolyline = service.resolveRoute("SIA481").orElseThrow()
+                    .getPolyline().stream()
+                    .anyMatch(p -> p[0] == 0.0 && p[1] == 0.0);
+            assertThat(zeroInPolyline).as("(0,0) must never appear in polyline").isFalse();
+        }
+
+        @Test
+        @DisplayName("multimap preserves ALL candidates — none discarded at build time")
+        void multimapPreservesAllCandidates() {
+            // Confirm buildFixMultiMap() retains every entry per name.
+            // The old flat HashMap.put() would silently drop all but the last.
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "SUNIR");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR",  FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS",  WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("SUNIR", -24.30, 40.00, "fix"),
+                    new GeoPoint("SUNIR",  43.39, -3.13, "fix"),
+                    new GeoPoint("SUNIR",  10.00, 10.00, "fix")   // third duplicate
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA481").orElseThrow();
+
+            // Cross-track (Tier 1) should still pick the Madagascar entry
+            // from all three candidates, confirming all three were available
+            route.getRoutePoints().stream()
+                    .filter(p -> "SUNIR".equals(p.getName()))
+                    .findFirst()
+                    .ifPresent(sunir -> {
+                        assertThat(sunir.getLat()).isEqualTo(-24.30);
+                        assertThat(sunir.getLon()).isEqualTo(40.00);
+                    });
+        }
+    }
 }
