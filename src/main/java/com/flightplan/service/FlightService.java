@@ -345,7 +345,7 @@ public class FlightService {
         fixMapSnapshot.compareAndSet(snapshot, next);
 
         log.debug("[FIXMAP] Rebuilt fix multimap: {} unique names from {} raw entries (lastRefreshed={})",
-                fresh.size(), getFixes().size() + getAirways().size(), currentRefresh);
+                fresh.size(), fresh.values().stream().mapToInt(List::size).sum(), currentRefresh);
         return fresh;
     }
 
