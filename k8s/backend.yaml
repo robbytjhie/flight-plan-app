@@ -31,18 +31,20 @@ spec:
           ports:
             - containerPort: 8080
           env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "mock"
 #            - name: SPRING_PROFILES_ACTIVE
 #              value: "prod"
-            - name: FLIGHT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: flightplan-secrets
-                  key: FLIGHT_API_KEY
-            - name: FLIGHT_API_BASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: flightplan-secrets
-                  key: FLIGHT_API_BASE_URL
+#            - name: FLIGHT_API_KEY
+#              valueFrom:
+#                secretKeyRef:
+#                  name: flightplan-secrets
+#                  key: FLIGHT_API_KEY
+#            - name: FLIGHT_API_BASE_URL
+#              valueFrom:
+#                secretKeyRef:
+#                  name: flightplan-secrets
+#                  key: FLIGHT_API_BASE_URL
             # IM8 S7: CORS allowlist from secret — no wildcard
             - name: CORS_ALLOWED_ORIGINS
               valueFrom:
