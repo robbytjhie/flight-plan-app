@@ -207,6 +207,7 @@ jobs:
        github.ref == 'refs/heads/develop' ||
        github.ref == 'refs/heads/develop-refactoring' ||
        startsWith(github.ref, 'refs/heads/feature/') ||
+       startsWith(github.ref, 'refs/heads/mock/') ||
        startsWith(github.ref, 'refs/tags/v'))
     permissions:
       contents: read
