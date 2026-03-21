@@ -9,7 +9,7 @@ name: CI/CD — Backend Build, Test, Quality Gate & Deploy
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
-    branches: [ main, develop, develop-refactoring, 'feature/**' ]
+    branches: [ main, develop, develop-refactoring, 'feature/**', 'mock/**' ]
     tags:     [ 'v*.*.*' ]
   pull_request:
     branches: [ main, develop, develop-refactoring ]
