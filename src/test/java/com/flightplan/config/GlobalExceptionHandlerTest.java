@@ -19,6 +19,7 @@ import java.util.Set;
 
 import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -293,5 +294,19 @@ class GlobalExceptionHandlerTest {
 
         assertThat(result.getStatus()).isEqualTo(404);
         assertThat(result.getTitle()).isEqualTo("Not Found");
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 400 when resource path is null (non-swagger branch)")
+    void handleNoResourceNullPathReturns400() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = mock(NoResourceFoundException.class);
+        when(ex.getResourcePath()).thenReturn(null);
+        when(ex.getMessage()).thenReturn("Resource not found");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(400);
+        assertThat(result.getTitle()).isEqualTo("Invalid Request");
     }
 }

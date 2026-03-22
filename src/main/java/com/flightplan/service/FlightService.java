@@ -332,6 +332,41 @@ public class FlightService {
         ));
     }
 
+    private static boolean isValidPolylineVertex(double[] p) {
+        return p != null && p.length >= 2
+                && !Double.isNaN(p[0]) && !Double.isNaN(p[1])
+                && !Double.isInfinite(p[0]) && !Double.isInfinite(p[1]);
+    }
+
+    /**
+     * Resolves coordinates for polyline index {@code i}, using neighbours if that slot is null
+     * or invalid so alternate-route construction never drops vertices (stays aligned with primary).
+     */
+    private double[] resolvePolylineVertex(List<double[]> line, int i) {
+        if (line == null) {
+            return null;
+        }
+        if (i >= 0 && i < line.size()) {
+            double[] p = line.get(i);
+            if (isValidPolylineVertex(p)) {
+                return p;
+            }
+        }
+        if (i > 0) {
+            double[] p = line.get(i - 1);
+            if (isValidPolylineVertex(p)) {
+                return p;
+            }
+        }
+        if (i + 1 < line.size()) {
+            double[] p = line.get(i + 1);
+            if (isValidPolylineVertex(p)) {
+                return p;
+            }
+        }
+        return null;
+    }
+
     public Optional<FlightRoute> resolveAlternateRoute(String callsign) {
         Optional<FlightRoute> primaryOpt = resolveRoute(callsign);
         if (primaryOpt.isEmpty()) return Optional.empty();
@@ -345,16 +380,19 @@ public class FlightService {
 
         List<double[]> altLine = new ArrayList<>(primaryLine.size());
         for (int i = 0; i < primaryLine.size(); i++) {
-            double[] p = primaryLine.get(i);
-            if (p == null || p.length < 2) continue;
+            double[] p = resolvePolylineVertex(primaryLine, i);
+            if (p == null) {
+                return Optional.of(primary);
+            }
 
             double lat = p[0];
             double lon = p[1];
 
+            // Offset only interior vertices — departure and destination must match the primary polyline.
             if (i > 0 && i < primaryLine.size() - 1) {
-                double[] prev = primaryLine.get(i - 1);
-                double[] next = primaryLine.get(i + 1);
-                if (prev != null && next != null && prev.length >= 2 && next.length >= 2) {
+                double[] prev = resolvePolylineVertex(primaryLine, i - 1);
+                double[] next = resolvePolylineVertex(primaryLine, i + 1);
+                if (prev != null && next != null) {
                     double dLat = next[0] - prev[0];
                     double dLon = normaliseLonDelta(next[1] - prev[1]);
                     double pLat = -dLon;
@@ -371,6 +409,19 @@ public class FlightService {
                 }
             }
             altLine.add(new double[]{lat, lon});
+        }
+
+        // Pin first/last to exact primary coordinates (defence in depth vs float drift or edge cases).
+        int n = primaryLine.size();
+        if (altLine.size() == n && n >= 2) {
+            double[] first = resolvePolylineVertex(primaryLine, 0);
+            double[] last = resolvePolylineVertex(primaryLine, n - 1);
+            if (first != null) {
+                altLine.set(0, new double[]{first[0], first[1]});
+            }
+            if (last != null) {
+                altLine.set(n - 1, new double[]{last[0], last[1]});
+            }
         }
 
         return Optional.of(new FlightRoute(

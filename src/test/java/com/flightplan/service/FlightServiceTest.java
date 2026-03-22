@@ -199,6 +199,38 @@ class FlightServiceTest {
             assertThat(pts.get(pts.size() - 1).getType()).isEqualTo("airport");
         }
 
+        @Test @DisplayName("MAS370 mock route skips second M646 airway vertex when coords duplicate earlier leg")
+        void mas370SkipsDuplicateM646AirwayVertex() {
+            MockDataService mockData = new MockDataService();
+            when(flightDataCache.getFlightPlans()).thenReturn(
+                    mockData.getMockFlightPlans().stream()
+                            .filter(p -> "MAS370".equals(p.getAircraftIdentification()))
+                            .toList());
+            when(flightDataCache.getFixes()).thenReturn(mockData.getMockFixes());
+            when(flightDataCache.getAirways()).thenReturn(mockData.getMockAirways());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("MAS370").orElseThrow();
+            long m646 = r.getRoutePoints().stream().filter(p -> "M646".equals(p.getName())).count();
+            assertThat(m646).isLessThanOrEqualTo(1);
+        }
+
+        @Test @DisplayName("GIA723 default mock route resolves with WIII departure")
+        void gia723DefaultMockRouteResolves() {
+            MockDataService mockData = new MockDataService();
+            when(flightDataCache.getFlightPlans()).thenReturn(
+                    mockData.getMockFlightPlans().stream()
+                            .filter(p -> "GIA723".equals(p.getAircraftIdentification()))
+                            .toList());
+            when(flightDataCache.getFixes()).thenReturn(mockData.getMockFixes());
+            when(flightDataCache.getAirways()).thenReturn(mockData.getMockAirways());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("GIA723").orElseThrow();
+            assertThat(r.getPolyline()).hasSizeGreaterThanOrEqualTo(2);
+            assertThat(r.getRoutePoints().get(0).getName()).isEqualTo("WIII");
+        }
+
         @Test @DisplayName("polyline has same count as routePoints")
         void polylineSameCount() {
             stubCache(List.of(buildSia200()));
@@ -1401,6 +1433,73 @@ class FlightServiceTest {
                 assertThat(alt).isPresent();
                 assertThat(alt.get().getPolyline()).isNotEmpty();
             }
+        }
+
+        @Test @DisplayName("alternate returns primary unchanged when polyline has no resolvable vertex at index 0")
+        void alternateReturnsPrimaryWhenStartUnresolvable() {
+            List<double[]> poly = new ArrayList<>();
+            poly.add(null);
+            poly.add(null);
+
+            FlightRoute primary = new FlightRoute();
+            primary.setCallsign("ALTNULL");
+            primary.setPolyline(poly);
+            primary.setRoutePoints(List.of());
+
+            FlightService spySvc = spy(service);
+            doReturn(Optional.of(primary)).when(spySvc).resolveRoute("ALTNULL");
+
+            Optional<FlightRoute> altOpt = spySvc.resolveAlternateRoute("ALTNULL");
+            assertThat(altOpt).isPresent();
+            assertThat(altOpt.get()).isSameAs(primary);
+        }
+
+        @Test @DisplayName("alternate resolves null middle polyline vertex via neighbour and keeps endpoints pinned")
+        void alternateResolvesNullMiddleVertex() {
+            List<double[]> poly = new ArrayList<>();
+            poly.add(new double[]{1.0, 100.0});
+            poly.add(null);
+            poly.add(new double[]{-33.0, 151.0});
+
+            FlightRoute primary = new FlightRoute();
+            primary.setCallsign("ALTMID");
+            primary.setPolyline(poly);
+            primary.setRoutePoints(List.of(
+                    new FlightRoute.RoutePoint("DEP", 1.0, 100.0, "airport", 0),
+                    new FlightRoute.RoutePoint("MID", 1.0, 100.0, "waypoint", 1),
+                    new FlightRoute.RoutePoint("DST", -33.0, 151.0, "airport", 999)));
+
+            FlightService spySvc = spy(service);
+            doReturn(Optional.of(primary)).when(spySvc).resolveRoute("ALTMID");
+
+            FlightRoute alt = spySvc.resolveAlternateRoute("ALTMID").orElseThrow();
+            assertThat(alt.getPolyline()).hasSize(3);
+            assertThat(alt.getPolyline().get(0)).containsExactly(1.0, 100.0);
+            assertThat(alt.getPolyline().get(2)).containsExactly(-33.0, 151.0);
+        }
+
+        @Test @DisplayName("alternate treats NaN polyline vertex as invalid and falls back to neighbour")
+        void alternateFallsBackForNaNVertex() {
+            List<double[]> poly = new ArrayList<>();
+            poly.add(new double[]{0.5, 99.0});
+            poly.add(new double[]{Double.NaN, 100.0});
+            poly.add(new double[]{1.5, 101.0});
+
+            FlightRoute primary = new FlightRoute();
+            primary.setCallsign("ALTNAN");
+            primary.setPolyline(poly);
+            primary.setRoutePoints(List.of(
+                    new FlightRoute.RoutePoint("A", 0.5, 99.0, "airport", 0),
+                    new FlightRoute.RoutePoint("B", 0.0, 0.0, "waypoint", 1),
+                    new FlightRoute.RoutePoint("C", 1.5, 101.0, "airport", 999)));
+
+            FlightService spySvc = spy(service);
+            doReturn(Optional.of(primary)).when(spySvc).resolveRoute("ALTNAN");
+
+            FlightRoute alt = spySvc.resolveAlternateRoute("ALTNAN").orElseThrow();
+            assertThat(alt.getPolyline()).hasSize(3);
+            assertThat(alt.getPolyline().get(0)).containsExactly(0.5, 99.0);
+            assertThat(alt.getPolyline().get(2)).containsExactly(1.5, 101.0);
         }
 
         @Test @DisplayName("alternate: zero-length prev→next at middle vertex skips perpendicular offset (norm ≤ 1e-9)")
