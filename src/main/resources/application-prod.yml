@@ -12,6 +12,8 @@
 #
 # Required environment variables / K8s Secrets:
 #   FLIGHT_API_KEY    — API key for api.swimapisg.info
+# Optional (emergency only — same as curl -k):
+#   FLIGHT_API_INSECURE_SSL=true  — skip TLS certificate verification if upstream cert is expired/invalid
 #   REDIS_HOST        — Redis hostname (default: localhost)
 #   REDIS_PORT        — Redis port (default: 6379)
 #   REDIS_PASSWORD    — Redis auth password (injected from K8s Secret)
@@ -31,6 +33,7 @@ flight:
   api:
     base-url: https://api.swimapisg.info
     key: ${FLIGHT_API_KEY}           # no default — fails fast if not set
+    insecure-ssl: ${FLIGHT_API_INSECURE_SSL:false}
 
 # ── Redis — required for distributed leader election ─────────────────────────
 # IM8 S5 (Data at Rest): credentials injected from K8s Secret

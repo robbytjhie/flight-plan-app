@@ -22,10 +22,12 @@
 #   → look for: [LEADER] dev — Redis not reachable ... Falling back to in-memory
 # ══════════════════════════════════════════════════════════════════════════════
 # IM8 S5: override FLIGHT_API_KEY via env var for real API calls
+# FLIGHT_API_INSECURE_SSL=true — if upstream TLS cert is bad/expired (curl -k equivalent)
 flight:
   api:
     base-url: ${FLIGHT_API_BASE_URL:https://api.swimapisg.info}
     key: ${FLIGHT_API_KEY:dev-placeholder-key}
+    insecure-ssl: ${FLIGHT_API_INSECURE_SSL:false}
 
 # ── Redis connection (optional in dev) ───────────────────────────────────────
 spring:
