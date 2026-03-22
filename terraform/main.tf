@@ -49,8 +49,8 @@ provider "aws" {
 variable "aws_region"        { default = "ap-southeast-1" }
 variable "environment"       { description = "staging | prod" }
 variable "app_image_tag"     { description = "ECR image tag to deploy" }
-variable "domain_name"       { description = "e.g. api.flightplan.example.io" }
-variable "acm_certificate_arn" { description = "ACM cert ARN for HTTPS on ALB" }
+# variable "domain_name"       { description = "e.g. api.flightplan.example.io" }
+# variable "acm_certificate_arn" { description = "ACM cert ARN for HTTPS on ALB" }
 variable "cors_allowed_origins" { description = "Comma-separated frontend origins" }
 variable "desired_count"     { default = 2 }
 variable "task_cpu"          { default = 512  }
