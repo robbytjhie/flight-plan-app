@@ -138,6 +138,8 @@ Once you have your API credentials:
 ```
 FLIGHT_API_BASE_URL=https://actual-api-base.com
 FLIGHT_API_KEY=your-real-api-key
+# Only if the upstream TLS certificate is expired/invalid (equivalent to curl -k):
+# FLIGHT_API_INSECURE_SSL=true
 ```
 
 2. The backend auto-detects real vs mock mode based on the key. No code changes needed.
