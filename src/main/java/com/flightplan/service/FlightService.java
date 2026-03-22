@@ -128,6 +128,27 @@ public class FlightService {
     /** Earth radius in km used for all haversine / cross-track calculations. */
     private static final double EARTH_RADIUS_KM = 6_371.0;
 
+    /**
+     * If an airway lookup returns a point this close to the fix we just added, it is duplicate
+     * geometry — do not insert a second polyline vertex.
+     */
+    private static final double AIRWAY_DUPLICATE_OF_FIX_KM = 3.0;
+
+    /**
+     * When both airports are known, skip inserting an airway representative point if it lies much
+     * farther off the dep→dest great-circle than the waypoint already on the route. Otherwise a
+     * wrong-FIR duplicate in the global airways/fixes dataset can draw a spurious leg (triangle /
+     * dogleg between two consecutive fixes on the map).
+     */
+    private static final double AIRWAY_OFF_CORRIDOR_EXCESS_KM = 220.0;
+
+    /**
+     * On short-ish en-route legs, skip an airway vertex if {@code wp→airway→next} is much longer
+     * than {@code wp→next} (parallel / bogus line next to the real fix-to-fix leg).
+     */
+    private static final double AIRWAY_DETOUR_MAX_DIRECT_KM = 2_000.0;
+    private static final double AIRWAY_DETOUR_RATIO = 1.20;
+
     // ── Flight Plans ──────────────────────────────────────────────────────────
 
     public List<FlightPlan> getAllFlightPlans() {
@@ -193,7 +214,8 @@ public class FlightService {
             List<FlightPlan.RouteElement> elements = plan.getFiledRoute().getRouteElement();
             elements.sort(Comparator.comparingInt(e -> (e.getSeqNum() == null ? 0 : e.getSeqNum())));
 
-            for (FlightPlan.RouteElement el : elements) {
+            for (int i = 0; i < elements.size(); i++) {
+                FlightPlan.RouteElement el = elements.get(i);
                 FlightPlan.Position pos = el.getPosition();
                 if (pos == null) continue;
 
@@ -239,11 +261,21 @@ public class FlightService {
                 if (airwayName != null && !airwayName.isBlank()) {
                     String aw = airwayName.trim().toUpperCase(Locale.ROOT);
                     if (!"DCT".equals(aw)) {
+                        // Same identifier as the designated point (e.g. fix G579, airway G579) —
+                        // the fix vertex already defines the corner; a second lookup can return a
+                        // different duplicate and draw a bogus chord between fixes.
+                        if (pointName != null && pointName.trim().equalsIgnoreCase(airwayName.trim())) {
+                            continue;
+                        }
                         GeoPoint airwayGp = bestCandidate(
                                 multiMap.get(aw),
                                 depLat, depLon, destLat, destLon,
                                 routePoints);
-                        if (hasValidCoords(airwayGp)) {
+                        Optional<double[]> nextLeg = resolveNextLegEnd(
+                                elements, i, multiMap, depLat, depLon, destLat, destLon, routePoints);
+                        if (hasValidCoords(airwayGp)
+                                && !shouldSkipSpuriousAirwayGeometry(
+                                        lat, lon, airwayGp, depLat, depLon, destLat, destLon, nextLeg)) {
                             routePoints.add(new FlightRoute.RoutePoint(
                                     aw, airwayGp.getLat(), airwayGp.getLon(), "airway", el.getSeqNum()));
                             polyline.add(new double[]{airwayGp.getLat(), airwayGp.getLon()});
@@ -545,6 +577,92 @@ public class FlightService {
                 + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
                   * Math.sin(dLon / 2) * Math.sin(dLon / 2);
         return EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    /**
+     * Lat/lon of the next point along the filed route (following element, else destination).
+     * Used to reject airway DB points that create an unnecessary kink vs fix→next.
+     */
+    private Optional<double[]> resolveNextLegEnd(
+            List<FlightPlan.RouteElement> elements,
+            int index,
+            Map<String, List<GeoPoint>> multiMap,
+            Double depLat, Double depLon,
+            Double destLat, Double destLon,
+            List<FlightRoute.RoutePoint> routePoints) {
+
+        if (index + 1 < elements.size()) {
+            return resolveElementLatLon(
+                    elements.get(index + 1), multiMap, depLat, depLon, destLat, destLon, routePoints);
+        }
+        if (destLat != null && destLon != null) {
+            return Optional.of(new double[]{destLat, destLon});
+        }
+        return Optional.empty();
+    }
+
+    /** Resolves coordinates for one route element (same rules as the main resolve loop). */
+    private Optional<double[]> resolveElementLatLon(
+            FlightPlan.RouteElement el,
+            Map<String, List<GeoPoint>> multiMap,
+            Double depLat, Double depLon,
+            Double destLat, Double destLon,
+            List<FlightRoute.RoutePoint> routePoints) {
+
+        if (el == null) return Optional.empty();
+        FlightPlan.Position pos = el.getPosition();
+        if (pos == null) return Optional.empty();
+        String pointName = pos.getDesignatedPoint();
+        if (pos.getLat() != null && pos.getLon() != null
+                && (pos.getLat() != 0.0 || pos.getLon() != 0.0)) {
+            return Optional.of(new double[]{pos.getLat(), pos.getLon()});
+        }
+        if (pointName != null && multiMap.containsKey(pointName)) {
+            GeoPoint gp = bestCandidate(multiMap.get(pointName), depLat, depLon, destLat, destLon, routePoints);
+            if (!hasValidCoords(gp)) return Optional.empty();
+            return Optional.of(new double[]{gp.getLat(), gp.getLon()});
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Skip inserting an airway representative vertex when it duplicates the fix we just added, or
+     * when it is far off the dep→dest corridor compared to that fix (wrong-FIR / bogus airway
+     * geometry in the merged dataset — causes map triangles between consecutive fixes), or when
+     * {@code wp→airway→next} is an unreasonable detour vs {@code wp→next} on short legs.
+     */
+    private boolean shouldSkipSpuriousAirwayGeometry(
+            double wpLat, double wpLon,
+            GeoPoint airwayGp,
+            Double depLat, Double depLon,
+            Double destLat, Double destLon,
+            Optional<double[]> nextLegOpt) {
+
+        double dist = haversineKm(wpLat, wpLon, airwayGp.getLat(), airwayGp.getLon());
+        if (dist < AIRWAY_DUPLICATE_OF_FIX_KM) {
+            return true;
+        }
+        if (depLat != null && depLon != null && destLat != null && destLon != null) {
+            double xtWp = crossTrackDistanceKm(wpLat, wpLon, depLat, depLon, destLat, destLon);
+            double xtAw = crossTrackDistanceKm(airwayGp.getLat(), airwayGp.getLon(), depLat, depLon, destLat, destLon);
+            if (xtAw > xtWp + AIRWAY_OFF_CORRIDOR_EXCESS_KM) {
+                return true;
+            }
+        }
+        if (nextLegOpt.isPresent()) {
+            double[] next = nextLegOpt.get();
+            double nLat = next[0];
+            double nLon = next[1];
+            double direct = haversineKm(wpLat, wpLon, nLat, nLon);
+            if (direct >= 5.0 && direct <= AIRWAY_DETOUR_MAX_DIRECT_KM) {
+                double via = haversineKm(wpLat, wpLon, airwayGp.getLat(), airwayGp.getLon())
+                        + haversineKm(airwayGp.getLat(), airwayGp.getLon(), nLat, nLon);
+                if (via > direct * AIRWAY_DETOUR_RATIO) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

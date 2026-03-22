@@ -357,6 +357,120 @@ class FlightServiceTest {
                     .isTrue();
         }
 
+        @Test @DisplayName("does not insert airway vertex when airway field equals designated point (avoids map dogleg)")
+        void skipRedundantAirwayWhenSameNameAsFix() {
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("WXZ1");
+            pos.setLat(-6.80);
+            pos.setLon(113.20);
+            el.setPosition(pos);
+            el.setAirway("WXZ1");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("WXZ1", -8.65, 115.22, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+            long wxz1Points = route.getRoutePoints().stream().filter(p -> "WXZ1".equals(p.getName())).count();
+            assertThat(wxz1Points).as("single fix vertex; no duplicate airway row").isEqualTo(1);
+            boolean bogusLeg = route.getPolyline().stream()
+                    .anyMatch(p -> Math.abs(p[0] - (-8.65)) < 0.01 && Math.abs(p[1] - 115.22) < 0.01);
+            assertThat(bogusLeg).as("second WXZ1 airway coords must not be drawn").isFalse();
+        }
+
+        @Test @DisplayName("skips airway representative far off dep→dest corridor vs fix (wrong-FIR duplicate)")
+        void skipSpuriousAirwayFarOffCorridor() {
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("FIXQ");
+            pos.setLat(-7.0);
+            pos.setLon(114.0);
+            el.setPosition(pos);
+            el.setAirway("SPUR");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("SPUR", 50.0, 10.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "SPUR".equals(p.getName())))
+                    .as("European duplicate must not create a route point")
+                    .isTrue();
+            assertThat(route.getPolyline().stream().noneMatch(p -> Math.abs(p[0] - 50.0) < 0.01))
+                    .as("spurious airway lat must not appear in polyline")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("skips airway vertex when wp→airway→next is a large detour vs wp→next (double line on map)")
+        void skipAirwayWhenDetourVersusNextFix() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("detour-01");
+            plan.setAircraftIdentification("DETOUR1");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("M774");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(-8.20);
+            p2.setLon(115.50);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("G579", -6.80, 113.20, "fix"),
+                    new GeoPoint("TAKAS", -8.20, 115.50, "fix")
+            ));
+            // Bogus M774 well south/west of the G579→TAKAS leg — large detour if inserted
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M774", -10.0, 113.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("DETOUR1").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "M774".equals(p.getName())))
+                    .as("detour airway must not be added between G579 and TAKAS")
+                    .isTrue();
+            assertThat(route.getPolyline().stream().noneMatch(p -> Math.abs(p[0] - (-10.0)) < 0.02))
+                    .as("bogus M774 lat must not appear in polyline")
+                    .isTrue();
+        }
+
         @Test @DisplayName("handles null filedRoute gracefully")
         void handlesNullFiledRoute() {
             FlightPlan plan = buildSia200();
