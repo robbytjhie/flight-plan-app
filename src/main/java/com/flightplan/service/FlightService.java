@@ -149,6 +149,20 @@ public class FlightService {
     private static final double AIRWAY_DETOUR_MAX_DIRECT_KM = 2_000.0;
     private static final double AIRWAY_DETOUR_RATIO = 1.20;
 
+    /**
+     * Skip an en-route row that repeats the departure aerodrome (same ICAO and essentially the same
+     * coordinates as the seeded departure vertex). Do not use a generic “near previous vertex” rule —
+     * some plans list distinct fixes that share coordinates.
+     */
+    private static final double DUPLICATE_DEPARTURE_WAYPOINT_KM = 5.0;
+
+    /**
+     * Do not insert an airway vertex if the same coordinates already appear on the polyline within
+     * the lookback window (e.g. same M646 navaid point inserted twice for consecutive legs).
+     */
+    private static final double DUPLICATE_AIRWAY_POLYLINE_KM = 2.0;
+    private static final int AIRWAY_POLYLINE_LOOKBACK = 40;
+
     // ── Flight Plans ──────────────────────────────────────────────────────────
 
     public List<FlightPlan> getAllFlightPlans() {
@@ -247,6 +261,17 @@ public class FlightService {
                     continue;
                 }
 
+                // Filed routes often repeat the departure airport as the first en-route row; that
+                // duplicates the vertex we already added from depGeo.
+                if (depIcao != null && pointName != null
+                        && depIcao.trim().equalsIgnoreCase(pointName.trim())
+                        && !polyline.isEmpty()) {
+                    double[] lp = polyline.get(polyline.size() - 1);
+                    if (haversineKm(lp[0], lp[1], lat, lon) < DUPLICATE_DEPARTURE_WAYPOINT_KM) {
+                        continue;
+                    }
+                }
+
                 String type = determinePointType(pointName).equals("airport") ? "airport" : "waypoint";
                 routePoints.add(new FlightRoute.RoutePoint(pointName, lat, lon, type, el.getSeqNum()));
                 polyline.add(new double[]{lat, lon});
@@ -274,6 +299,12 @@ public class FlightService {
                         Optional<double[]> nextLeg = resolveNextLegEnd(
                                 elements, i, multiMap, depLat, depLon, destLat, destLon, routePoints);
                         if (hasValidCoords(airwayGp)
+                                && !polylineHasVertexNear(
+                                        polyline,
+                                        airwayGp.getLat(),
+                                        airwayGp.getLon(),
+                                        DUPLICATE_AIRWAY_POLYLINE_KM,
+                                        AIRWAY_POLYLINE_LOOKBACK)
                                 && !shouldSkipSpuriousAirwayGeometry(
                                         lat, lon, airwayGp, depLat, depLon, destLat, destLon, nextLeg)) {
                             routePoints.add(new FlightRoute.RoutePoint(
@@ -577,6 +608,28 @@ public class FlightService {
                 + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
                   * Math.sin(dLon / 2) * Math.sin(dLon / 2);
         return EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    /**
+     * True if {@code polyline} already contains a vertex within {@code km} of (lat, lon),
+     * scanning only the last {@code lookback} points (or fewer if the list is shorter).
+     */
+    private boolean polylineHasVertexNear(
+            List<double[]> polyline, double lat, double lon, double km, int lookback) {
+        if (polyline == null || polyline.isEmpty()) {
+            return false;
+        }
+        int start = Math.max(0, polyline.size() - lookback);
+        for (int j = polyline.size() - 1; j >= start; j--) {
+            double[] p = polyline.get(j);
+            if (p == null || p.length < 2) {
+                continue;
+            }
+            if (haversineKm(p[0], p[1], lat, lon) < km) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -99,8 +99,8 @@ public class MockDataService {
 
     private List<String[]> getWaypointsForRoute(String callsign) {
         return switch (callsign) {
+            // Do not repeat departure ICAO as the first route row — resolveRoute already seeds dep.
             case "SIA200" -> List.of(
-                    new String[]{"WSSS", "1.3644", "103.9915", "DCT"},
                     new String[]{"PARDI", "1.10", "104.20", "A576"},
                     new String[]{"BATAM", "1.12", "104.04", "A576"},
                     new String[]{"RIGVU", "-0.50", "104.60", "M635"},
@@ -111,10 +111,9 @@ public class MockDataService {
                     new String[]{"YSSY", "-33.9461", "151.1772", "DCT"}
             );
             case "MAS370" -> List.of(
-                    new String[]{"WMKK", "2.7456", "101.7099", "DCT"},
                     new String[]{"IKELA", "4.00", "103.20", "M646"},
-                    new String[]{"ALBOX", "8.30", "108.40", "M646"},
                     new String[]{"IGARI", "6.93", "103.58", "N571"},
+                    new String[]{"ALBOX", "8.30", "108.40", "M646"},
                     new String[]{"BITOD", "10.50", "108.10", "N571"},
                     new String[]{"VICHY", "15.20", "112.30", "A1"},
                     new String[]{"RAMBO", "20.10", "116.50", "A1"},
@@ -122,7 +121,6 @@ public class MockDataService {
                     new String[]{"ZBAA", "40.0799", "116.6031", "DCT"}
             );
             case "CPA101" -> List.of(
-                    new String[]{"VHHH", "22.3080", "113.9185", "DCT"},
                     new String[]{"MARPA", "19.50", "112.80", "B330"},
                     new String[]{"ELATO", "15.20", "109.50", "B330"},
                     new String[]{"ANITO", "10.30", "107.20", "A1"},
@@ -130,7 +128,6 @@ public class MockDataService {
                     new String[]{"WSSS", "1.3644", "103.9915", "DCT"}
             );
             case "UAL837" -> List.of(
-                    new String[]{"KSFO", "37.6213", "-122.3790", "DCT"},
                     new String[]{"KSEA1", "40.00", "-145.00", "NOPAC"},
                     new String[]{"ADAK1", "51.88", "176.65", "NOPAC"},
                     new String[]{"NIPPI", "46.00", "160.00", "A590"},
@@ -138,7 +135,6 @@ public class MockDataService {
                     new String[]{"RJAA", "35.7647", "140.3864", "DCT"}
             );
             case "QFA002" -> List.of(
-                    new String[]{"YSSY", "-33.9461", "151.1772", "DCT"},
                     new String[]{"TESAT", "-29.50", "148.20", "H65"},
                     new String[]{"ENTRA", "-22.10", "139.50", "H65"},
                     new String[]{"MIPAK", "-12.50", "128.80", "M635"},
@@ -149,7 +145,6 @@ public class MockDataService {
                     new String[]{"EGLL", "51.4775", "-0.4614", "DCT"}
             );
             case "EK432" -> List.of(
-                    new String[]{"OMDB", "25.2528", "55.3644", "DCT"},
                     new String[]{"DESDI", "15.00", "65.50", "P570"},
                     new String[]{"AGOSA", "8.30", "75.20", "P570"},
                     new String[]{"OPAMO", "3.50", "85.10", "M300"},
@@ -157,14 +152,12 @@ public class MockDataService {
                     new String[]{"WSSS", "1.3644", "103.9915", "DCT"}
             );
             case "THA669" -> List.of(
-                    new String[]{"VTBS", "13.6811", "100.7470", "DCT"},
                     new String[]{"ATMAP", "10.50", "102.10", "M752"},
                     new String[]{"ANOKA", "7.20", "103.50", "M752"},
                     new String[]{"PARDI", "4.30", "103.80", "A576"},
                     new String[]{"WSSS", "1.3644", "103.9915", "DCT"}
             );
             default -> List.of(
-                    new String[]{"WIII", "-6.1275", "106.6537", "DCT"},
                     new String[]{"DUBSA", "-4.50", "105.80", "W7"},
                     new String[]{"RIGVU", "-2.80", "104.90", "W7"},
                     new String[]{"WSSS", "1.3644", "103.9915", "DCT"}
