@@ -281,4 +281,17 @@ class GlobalExceptionHandlerTest {
 
         assertThat(result.getStatus()).isEqualTo(404);
     }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for webjars/ path directly")
+    void webjarsPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "webjars/swagger-ui/swagger-ui-bundle.js");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
+        assertThat(result.getTitle()).isEqualTo("Not Found");
+    }
 }

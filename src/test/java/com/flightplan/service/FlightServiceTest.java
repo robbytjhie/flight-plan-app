@@ -767,6 +767,155 @@ class FlightServiceTest {
                     .isTrue();
         }
 
+        @Test @DisplayName("detour ratio not applied when direct leg < 5 km (branch guard)")
+        void airwayDetourSkippedWhenDirectLegVeryShort() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-short");
+            plan.setAircraftIdentification("COVSHORT");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("ZZZZ");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("ZZZZ");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("A");
+            p1.setLat(1.0);
+            p1.setLon(100.0);
+            e1.setPosition(p1);
+            e1.setAirway("AW1");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("B");
+            p2.setLat(1.035);
+            p2.setLon(100.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("AW1", 1.018, 100.08, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVSHORT").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "AW1".equals(p.getName())))
+                    .as("direct < 5 km → detour ratio block skipped; airway may still insert")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("detour ratio not applied when direct leg > 2000 km (branch guard)")
+        void airwayDetourSkippedWhenDirectLegVeryLong() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-long");
+            plan.setAircraftIdentification("COVLONG");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("ZZLL");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("ZZRR");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("NY");
+            p1.setLat(40.0);
+            p1.setLon(-74.0);
+            e1.setPosition(p1);
+            e1.setAirway("MIDUS");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("LA");
+            p2.setLat(34.0);
+            p2.setLon(-118.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            // No airport coords → dep/dest lat/lon null → cross-track airway filter not applied
+            when(flightDataCache.getFixes()).thenReturn(List.of());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDUS", 37.0, -96.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVLONG").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDUS".equals(p.getName())))
+                    .as("direct > 2000 km → detour window skipped; reasonable midpoint airway kept")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("resolveElementLatLon returns empty when next fix name maps to (0,0) only")
+        void nextLegUnresolvedWhenFixIsNameOnlyZero() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-zero");
+            plan.setAircraftIdentification("COVZERO");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("ONLYZERO");
+            p2.setLat(0.0);
+            p2.setLon(0.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("ONLYZERO", 0.0, 0.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVZERO").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .as("next leg unresolvable from (0,0) name-only fix")
+                    .isTrue();
+        }
+
         @Test @DisplayName("handles null filedRoute gracefully")
         void handlesNullFiledRoute() {
             FlightPlan plan = buildSia200();
@@ -1252,6 +1401,65 @@ class FlightServiceTest {
                 assertThat(alt).isPresent();
                 assertThat(alt.get().getPolyline()).isNotEmpty();
             }
+        }
+
+        @Test @DisplayName("alternate: zero-length prev→next at middle vertex skips perpendicular offset (norm ≤ 1e-9)")
+        void alternateSkipsOffsetWhenPrevEqualsNextDelta() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("alt-norm");
+            plan.setAircraftIdentification("ALTNORM");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("D1");
+            p1.setLat(5.0);
+            p1.setLon(100.0);
+            e1.setPosition(p1);
+            e1.setAirway("DCT");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("D2");
+            p2.setLat(5.0);
+            p2.setLon(100.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.RouteElement e3 = new FlightPlan.RouteElement();
+            e3.setSeqNum(3);
+            FlightPlan.Position p3 = new FlightPlan.Position();
+            p3.setDesignatedPoint("D3");
+            p3.setLat(5.0);
+            p3.setLon(100.0);
+            e3.setPosition(p3);
+            e3.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2, e3)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute primary = service.resolveRoute("ALTNORM").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("ALTNORM").orElseThrow();
+            assertThat(alt.getPolyline()).hasSameSizeAs(primary.getPolyline());
+            // Index 2: prev and next both (5,100) → degenerate segment → lat/lon unchanged
+            assertThat(alt.getPolyline().get(2)[0]).isEqualTo(5.0);
+            assertThat(alt.getPolyline().get(2)[1]).isEqualTo(100.0);
         }
     }
 
