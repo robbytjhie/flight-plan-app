@@ -313,6 +313,24 @@ class FlightDataCacheTest {
             assertThat(cache.getFlightPlans().get(0).getAircraftIdentification()).isEqualTo("EK432");
         }
 
+        @Test @DisplayName("treats empty-string lastUpdatedTimeStamp as blank (parseInstant)")
+        void treatsEmptyStringTimestampAsBlank() {
+            FlightPlan existing = buildPlan("SIA200");
+            existing.setLastUpdatedTimeStamp("2026-03-17T01:00:00Z");
+            existing.setAircraftOperating("EXISTING");
+
+            FlightPlan emptyTs = buildPlan("SIA200");
+            emptyTs.setLastUpdatedTimeStamp("");
+            emptyTs.setAircraftOperating("EMPTY");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(existing, emptyTs));
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("EXISTING");
+        }
+
         @Test @DisplayName("keeps existing entry when candidate has no timestamp and existing does (isNewer returns false)")
         void keepsExistingWhenCandidateHasNoTimestamp() {
             // candidate has no timestamp → cand is empty → isNewer returns false → existing kept

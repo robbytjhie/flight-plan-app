@@ -559,18 +559,9 @@ public class FlightService {
         // that airport — the correct regional fix will almost always be nearby.
         // We use "nearest endpoint" (min of dep/dest distances) rather than
         // always dep, to handle the symmetric case where only dest is known.
+        // Dep known, dest unknown (Tier 1 requires both — already returned above).
         if (depLat != null && depLon != null) {
             final double dLat = depLat, dLon = depLon;
-            if (destLat != null && destLon != null) {
-                // Both available but we're in Tier 2 due to logic fall-through —
-                // should not reach here, but guard defensively
-                final double xLat = destLat, xLon = destLon;
-                return valid.stream()
-                        .min(Comparator.comparingDouble(gp ->
-                                Math.min(haversineKm(gp.getLat(), gp.getLon(), dLat, dLon),
-                                         haversineKm(gp.getLat(), gp.getLon(), xLat, xLon))))
-                        .orElse(valid.get(0));
-            }
             return valid.stream()
                     .min(Comparator.comparingDouble(gp ->
                             haversineKm(gp.getLat(), gp.getLon(), dLat, dLon)))

@@ -158,7 +158,8 @@ public class MockDataService {
                     new String[]{"WSSS", "1.3644", "103.9915", "DCT"}
             );
             default -> List.of(
-                    new String[]{"DUBSA", "-4.50", "105.80", "W7"},
+                    // 3-tuple (no airway column) → buildRouteForFlight uses default "DCT"
+                    new String[]{"DUBSA", "-4.50", "105.80"},
                     new String[]{"RIGVU", "-2.80", "104.90", "W7"},
                     new String[]{"WSSS", "1.3644", "103.9915", "DCT"}
             );

@@ -13,6 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -167,6 +168,28 @@ class FlightServiceTest {
         void emptyForUnknown() {
             stubCache(List.of(buildSia200()));
             assertThat(service.resolveRoute("XXXXXX")).isEmpty();
+        }
+
+        @Test @DisplayName("fix multimap snapshot is reused when lastRefreshed is unchanged across resolveRoute calls")
+        void multimapSnapshotReusedWhenLastRefreshedStable() {
+            stubCache(List.of(buildSia200()));
+            Instant ts = Instant.parse("2025-06-01T12:00:00Z");
+            when(flightDataCache.getLastRefreshed()).thenReturn(ts);
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            // buildFixMultiMap() calls getFixes() once per snapshot rebuild only
+            verify(flightDataCache, times(1)).getFixes();
+        }
+
+        @Test @DisplayName("fix multimap rebuilds when lastRefreshed changes between resolveRoute calls")
+        void multimapRebuiltWhenLastRefreshedChanges() {
+            stubCache(List.of(buildSia200()));
+            when(flightDataCache.getLastRefreshed()).thenReturn(
+                    Instant.parse("2025-06-01T12:00:00Z"),
+                    Instant.parse("2025-06-02T12:00:00Z"));
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            verify(flightDataCache, times(2)).getFixes();
         }
 
         @Test @DisplayName("returns resolved FlightRoute for SIA200")
@@ -1562,18 +1585,14 @@ class FlightServiceTest {
         }
     }
 
-    // ── bestCandidate — Tier 2 defensive branch ───────────────────────
+    // ── bestCandidate — Tier 2 (single endpoint known) ──────────────────
 
-    @Nested @DisplayName("bestCandidate() — Tier 2 defensive both-endpoints branch")
+    @Nested @DisplayName("bestCandidate() — Tier 2 single-endpoint disambiguation")
     class BestCandidateTier2DefensiveTests {
 
         /**
-         * The Tier-2 block in bestCandidate() has a defensive inner check:
-         * "if (depLat != null && depLon != null) { if (destLat != null && destLon != null) { ... } }"
-         * This inner "both available" sub-branch can only be reached if Tier 1 somehow
-         * didn't fire. We can't reach it via resolveRoute() in practice (Tier 1 always
-         * fires when both are known), so we exercise the Tier 2 dep-only branch directly
-         * through resolveRoute() with a flight whose dest is NOT in the fix map.
+         * Tier 1 runs when both dep and dest coordinates are known. Here dest is absent
+         * from the fix map, so Tier 2 picks the duplicate waypoint closest to departure.
          */
         @Test @DisplayName("Tier 2 dep-only: picks closest to departure when dest not in fix map")
         void tier2DepOnly_destMissingFromFixMap() {
@@ -2288,6 +2307,51 @@ class FlightServiceTest {
                         assertThat(sunir.getLat()).isEqualTo(-24.30);
                         assertThat(sunir.getLon()).isEqualTo(40.00);
                     });
+        }
+    }
+
+    /**
+     * Exercises {@link FlightService} private {@code polylineHasVertexNear} branches that are hard
+     * to hit from {@link #resolveRoute(String)} alone (null list, empty list, null polyline slot).
+     */
+    @Nested
+    @DisplayName("polylineHasVertexNear() via reflection")
+    class PolylineHasVertexNearReflectionTests {
+
+        private boolean invokeNear(List<double[]> poly, double lat, double lon, double km, int lookback)
+                throws Exception {
+            Method m = FlightService.class.getDeclaredMethod(
+                    "polylineHasVertexNear", List.class, double.class, double.class, double.class, int.class);
+            m.setAccessible(true);
+            return (Boolean) m.invoke(service, poly, lat, lon, km, lookback);
+        }
+
+        @Test
+        @DisplayName("returns false when polyline is null")
+        void falseWhenPolylineNull() throws Exception {
+            assertThat(invokeNear(null, 1.0, 2.0, 1.0, 40)).isFalse();
+        }
+
+        @Test
+        @DisplayName("returns false when polyline is empty")
+        void falseWhenPolylineEmpty() throws Exception {
+            assertThat(invokeNear(List.of(), 1.0, 2.0, 1.0, 40)).isFalse();
+        }
+
+        @Test
+        @DisplayName("skips null polyline slots and still detects a nearby vertex")
+        void skipsNullSlotAndDetectsNear() throws Exception {
+            List<double[]> pl = new ArrayList<>();
+            pl.add(null);
+            pl.add(new double[]{1.0, 2.0});
+            assertThat(invokeNear(pl, 1.0, 2.0, 0.001, 40)).isTrue();
+        }
+
+        @Test
+        @DisplayName("returns false when no vertex lies within the distance threshold")
+        void falseWhenNothingNear() throws Exception {
+            List<double[]> pl = List.of(new double[]{0.0, 0.0}, new double[]{10.0, 10.0});
+            assertThat(invokeNear(pl, 80.0, 80.0, 2.0, 40)).isFalse();
         }
     }
 }
