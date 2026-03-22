@@ -12,8 +12,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: ad6a7f8148e0242e49470e80ed70de4c-e4d39a60fec22e86.elb.ap-southeast-1.amazonaws.com
-      http:
+    - http:
         paths:
           - path: /api
             pathType: Prefix
@@ -51,3 +50,5 @@ spec:
                 name: frontend
                 port:
                   number: 80
+# ad4e5975b108c421b91cfe081aef824a-1491209421.ap-southeast-1.elb.amazonaws.com  >> for staging
+# a71a3827890414a25bb1130e842524d2-368551675.ap-southeast-1.elb.amazonaws.com   >> for prod

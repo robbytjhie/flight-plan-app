@@ -224,7 +224,6 @@
                 <exclude>com/flightplan/model/FlightPlan$*.class</exclude>
                 <exclude>com/flightplan/model/FlightRoute.class</exclude>
                 <exclude>com/flightplan/model/FlightRoute$*.class</exclude>
-                <exclude>com/flightplan/service/LiveDataFetchStrategy.class</exclude>
               </excludes>
             </configuration>
           </execution>

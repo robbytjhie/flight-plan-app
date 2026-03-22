@@ -41,6 +41,8 @@ services:
     environment:
       - FLIGHT_API_BASE_URL=${FLIGHT_API_BASE_URL:-https://mock-api.example.com}
       - FLIGHT_API_KEY=${FLIGHT_API_KEY:-mock-api-key-for-dev}
+      # Same as curl -k when upstream cert is not in JVM trust store (e.g. api.swimapisg.info)
+      - FLIGHT_API_INSECURE_SSL=${FLIGHT_API_INSECURE_SSL:-false}
       - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-default}
       # IM8 S7: explicit CORS allowlist — no wildcard
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000}

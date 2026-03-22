@@ -5,6 +5,7 @@ import com.flightplan.model.FlightPlan;
 import com.flightplan.model.FlightRoute;
 import com.flightplan.model.GeoPoint;
 import com.flightplan.service.FlightService;
+import io.swagger.v3.oas.annotations.Hidden;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.ArraySchema;
@@ -181,6 +182,15 @@ public class FlightController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    // -- Geopoints (internal only — hidden from Swagger, blocked externally) --
+
+    /**
+     * Internal endpoint — not exposed in Swagger UI and blocked by SecurityConfig
+     * for external callers. Airways and fixes are only needed server-side by
+     * FlightService.buildFixMap() during route resolution; the frontend never calls
+     * these directly (routes are returned with coordinates already resolved).
+     */
+    @Hidden
     @Operation(summary = "List all airways geopoints", description = "Returns all airway geopoints from the cache.")
     @ApiResponse(responseCode = "200", description = "Airways list")
     @GetMapping("/geopoints/airways")
@@ -188,6 +198,11 @@ public class FlightController {
         return ResponseEntity.ok(flightService.getAirways());
     }
 
+    /**
+     * Internal endpoint — not exposed in Swagger UI and blocked by SecurityConfig
+     * for external callers. See {@link #getAirways()} for rationale.
+     */
+    @Hidden
     @Operation(summary = "List all fix/waypoint geopoints", description = "Returns all fix geopoints from the cache.")
     @ApiResponse(responseCode = "200", description = "Fixes list")
     @GetMapping("/geopoints/fixes")

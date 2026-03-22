@@ -19,6 +19,7 @@ import java.util.Set;
 
 import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -236,10 +237,12 @@ class GlobalExceptionHandlerTest {
         @Test
         @DisplayName("NullPointerException from service is handled as 500")
         void nullPointerExceptionHandledAs500() throws Exception {
-            when(flightService.getAirways())
+            // Use /api/flights (always permitted) to trigger the 500 path —
+            // /api/geopoints/** is blocked externally (403) and cannot reach the handler.
+            when(flightService.getAllFlightPlans())
                     .thenThrow(new NullPointerException("null ref in service"));
 
-            mockMvc.perform(get("/api/geopoints/airways"))
+            mockMvc.perform(get("/api/flights"))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.title").value("Internal Server Error"));
         }
@@ -278,5 +281,32 @@ class GlobalExceptionHandlerTest {
         ProblemDetail result = handler.handleNoResource(ex, null);
 
         assertThat(result.getStatus()).isEqualTo(404);
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for webjars/ path directly")
+    void webjarsPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "webjars/swagger-ui/swagger-ui-bundle.js");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
+        assertThat(result.getTitle()).isEqualTo("Not Found");
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 400 when resource path is null (non-swagger branch)")
+    void handleNoResourceNullPathReturns400() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = mock(NoResourceFoundException.class);
+        when(ex.getResourcePath()).thenReturn(null);
+        when(ex.getMessage()).thenReturn("Resource not found");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(400);
+        assertThat(result.getTitle()).isEqualTo("Invalid Request");
     }
 }

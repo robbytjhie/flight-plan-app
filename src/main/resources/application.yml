@@ -84,3 +84,6 @@ logging:
   level:
     org.springframework.web: WARN
     org.springframework.security: WARN
+openapi:
+  server-url: ${OPENAPI_SERVER_URL:http://localhost:8080}
+  server-description: ${OPENAPI_SERVER_DESCRIPTION:Local development}
