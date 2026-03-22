@@ -326,7 +326,7 @@ resource "aws_elasticache_cluster" "redis" {
 # }
 
 # ── ALB ───────────────────────────────────────────────────────────────────────
-# commented out — ALB replaced by ingress-nginx NLB provisioned by EKS
+# commented out — ALB replaced by ingress-nginx NLB provisioned by EKS side
 
 # resource "aws_lb" "main" {
 #   name               = "flight-plan-${var.environment}"
