@@ -2,6 +2,7 @@ package com.flightplan.config;
 
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -25,9 +26,12 @@ import java.security.KeyStore;
  * MockDataFetchStrategy never makes network calls.
  *
  * IM8 S5 (Data in Transit):
- *   - WebClient enforces TLS for all outbound calls to api.swimapisg.info
+ *   - WebClient uses TLS for all outbound calls to api.swimapisg.info
  *   - API key injected via FLIGHT_API_KEY environment variable / K8s Secret
- *   - SSL context validates upstream certificate against JVM system trust store
+ *   - By default the SSL context validates the upstream certificate (JVM trust store)
+ *   - Optional {@code flight.api.insecure-ssl} / {@code FLIGHT_API_INSECURE_SSL=true}
+ *     disables certificate verification (same idea as {@code curl -k}) — use only when
+ *     the upstream presents an expired or otherwise invalid certificate until it is fixed
  *   - Redirects disabled to prevent SSRF
  */
 @Configuration
@@ -37,7 +41,7 @@ public class AppConfig {
     // ── prod WebClient — only wired when profile = prod ───────────────────────
 
     /**
-     * TLS-enforced WebClient for the upstream Flight Manager API.
+     * TLS-enforced WebClients for the upstream Flight Manager API.
      * Only created in the prod profile — dev uses MockDataFetchStrategy instead.
      *
      * The apikey header value comes from FLIGHT_API_KEY environment variable
@@ -55,17 +59,28 @@ public class AppConfig {
     @Profile({"dev", "prod"})
     public WebClient flightApiWebClient(
             @Value("${flight.api.base-url}") String baseUrl,
-            @Value("${flight.api.key}")      String apiKey) throws Exception {
+            @Value("${flight.api.key}") String apiKey,
+            @Value("${flight.api.insecure-ssl:false}") boolean insecureSsl) throws Exception {
 
-        log.info("[WEBCLIENT] prod profile — configuring TLS WebClient for {}", baseUrl);
+        log.info("[WEBCLIENT] configuring TLS WebClient for {} (insecure-ssl={})", baseUrl, insecureSsl);
 
-        TrustManagerFactory tmf = TrustManagerFactory
-                .getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        tmf.init((KeyStore) null); // JVM default trust store (system CA bundle)
-
-        SslContext sslContext = SslContextBuilder.forClient()
-                .trustManager(tmf)
-                .build();
+        final SslContext sslContext;
+        if (insecureSsl) {
+            log.warn(
+                    "[WEBCLIENT] flight.api.insecure-ssl=true — server TLS certificate verification is "
+                            + "DISABLED (curl -k behaviour). Re-enable verification after the upstream "
+                            + "certificate is renewed.");
+            sslContext = SslContextBuilder.forClient()
+                    .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                    .build();
+        } else {
+            TrustManagerFactory tmf = TrustManagerFactory
+                    .getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init((KeyStore) null); // JVM default trust store (system CA bundle)
+            sslContext = SslContextBuilder.forClient()
+                    .trustManager(tmf)
+                    .build();
+        }
 
         HttpClient httpClient = HttpClient.create()
                 .secure(sslSpec -> sslSpec.sslContext(sslContext))

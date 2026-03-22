@@ -223,6 +223,171 @@ class FlightDataCacheTest {
         }
     }
 
+    // ── Lock unlock exception ─────────────────────────────────────────
+
+    @Nested @DisplayName("Lock unlock failure (lock.unlock() throws)")
+    class UnlockFailureTests {
+
+        @BeforeEach
+        void acquireLock() {
+            when(lock.tryLock()).thenReturn(true);
+        }
+
+        @Test @DisplayName("does not propagate exception when lock.unlock() throws")
+        void doesNotPropagateWhenUnlockThrows() {
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of());
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+            doThrow(new RuntimeException("redis gone")).when(lock).unlock();
+
+            // Must not throw even though unlock() fails
+            cache.refreshIfLeader();
+        }
+
+        @Test @DisplayName("cache is still populated when unlock() throws after a successful fetch")
+        void cachePopulatedEvenWhenUnlockThrows() {
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(buildPlan("SIA200")));
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+            doThrow(new RuntimeException("redis gone")).when(lock).unlock();
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+        }
+    }
+
+    // ── dedupeFlightPlans edge cases ──────────────────────────────────
+
+    @Nested @DisplayName("dedupeFlightPlans — edge cases")
+    class DedupeEdgeCaseTests {
+
+        @BeforeEach
+        void acquireLock() {
+            when(lock.tryLock()).thenReturn(true);
+            when(flightFetchService.fetchAirways()).thenReturn(List.of());
+            when(flightFetchService.fetchFixes()).thenReturn(List.of());
+        }
+
+        @Test @DisplayName("returns empty list when raw list is null")
+        void returnsEmptyForNullRaw() {
+            when(flightFetchService.fetchFlightPlans()).thenReturn(null);
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).isEmpty();
+        }
+
+        @Test @DisplayName("returns empty list when raw list is empty")
+        void returnsEmptyForEmptyRaw() {
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of());
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).isEmpty();
+        }
+
+        @Test @DisplayName("skips null FlightPlan entries in the raw list")
+        void skipsNullFlightPlanEntries() {
+            // List.of doesn't allow nulls — use ArrayList
+            java.util.List<FlightPlan> withNull = new java.util.ArrayList<>();
+            withNull.add(null);
+            withNull.add(buildPlan("EK432"));
+            when(flightFetchService.fetchFlightPlans()).thenReturn(withNull);
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftIdentification()).isEqualTo("EK432");
+        }
+
+        @Test @DisplayName("skips FlightPlan with null callsign")
+        void skipsNullCallsign() {
+            FlightPlan noCallsign = buildPlan("SIA200");
+            noCallsign.setAircraftIdentification(null);
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(noCallsign, buildPlan("EK432")));
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftIdentification()).isEqualTo("EK432");
+        }
+
+        @Test @DisplayName("treats empty-string lastUpdatedTimeStamp as blank (parseInstant)")
+        void treatsEmptyStringTimestampAsBlank() {
+            FlightPlan existing = buildPlan("SIA200");
+            existing.setLastUpdatedTimeStamp("2026-03-17T01:00:00Z");
+            existing.setAircraftOperating("EXISTING");
+
+            FlightPlan emptyTs = buildPlan("SIA200");
+            emptyTs.setLastUpdatedTimeStamp("");
+            emptyTs.setAircraftOperating("EMPTY");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(existing, emptyTs));
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("EXISTING");
+        }
+
+        @Test @DisplayName("keeps existing entry when candidate has no timestamp and existing does (isNewer returns false)")
+        void keepsExistingWhenCandidateHasNoTimestamp() {
+            // candidate has no timestamp → cand is empty → isNewer returns false → existing kept
+            FlightPlan existing = buildPlan("SIA200");
+            existing.setLastUpdatedTimeStamp("2026-03-17T01:00:00Z");
+            existing.setAircraftOperating("EXISTING");
+
+            FlightPlan noTs = buildPlan("SIA200");
+            noTs.setLastUpdatedTimeStamp(null);
+            noTs.setAircraftOperating("NOTIMESTAMP");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(existing, noTs));
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("EXISTING");
+        }
+
+        @Test @DisplayName("keeps existing entry when both timestamps are unparseable (isNewer false for both)")
+        void keepsExistingWhenBothTimestampsUnparseable() {
+            FlightPlan first = buildPlan("SIA200");
+            first.setLastUpdatedTimeStamp("bad-ts");
+            first.setAircraftOperating("FIRST");
+
+            FlightPlan second = buildPlan("SIA200");
+            second.setLastUpdatedTimeStamp("also-bad");
+            second.setAircraftOperating("SECOND");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(first, second));
+
+            cache.refreshIfLeader();
+
+            // Neither candidate beats the existing — first entry is retained
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("FIRST");
+        }
+
+        @Test @DisplayName("keeps older entry when candidate timestamp is earlier than existing")
+        void keepsExistingWhenCandidateIsOlder() {
+            FlightPlan newer = buildPlan("SIA200");
+            newer.setLastUpdatedTimeStamp("2026-03-17T02:00:00Z");
+            newer.setAircraftOperating("NEWER");
+
+            FlightPlan older = buildPlan("SIA200");
+            older.setLastUpdatedTimeStamp("2026-03-17T01:00:00Z");
+            older.setAircraftOperating("OLDER");
+
+            when(flightFetchService.fetchFlightPlans()).thenReturn(List.of(newer, older));
+
+            cache.refreshIfLeader();
+
+            assertThat(cache.getFlightPlans()).hasSize(1);
+            assertThat(cache.getFlightPlans().get(0).getAircraftOperating()).isEqualTo("NEWER");
+        }
+    }
+
     // ── Leader Election: pod loses lock ───────────────────────────────
 
     @Nested @DisplayName("Pod loses the distributed lock (not leader)")

@@ -8,6 +8,7 @@ import io.swagger.v3.oas.models.servers.Server;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 
 import java.util.List;
 
@@ -21,10 +22,14 @@ import java.util.List;
  * In production, set springdoc.swagger-ui.enabled=false via environment variable.
  */
 @Configuration
+@Profile("!prod")
 public class OpenApiConfig {
 
-    @Value("${server.port:8080}")
-    private String serverPort;
+    @Value("${openapi.server-url:http://localhost:8080}")
+    private String serverUrl;
+
+    @Value("${openapi.server-description:Local development}")
+    private String serverDescription;
 
     @Bean
     public OpenAPI flightPlanOpenAPI() {
@@ -50,8 +55,7 @@ public class OpenApiConfig {
                                 .name("Proprietary")
                                 .url("https://example.com/license")))
                 .servers(List.of(
-                        new Server().url("http://localhost:" + serverPort).description("Local development"),
-                        new Server().url("https://flightplan.example.com").description("Production")
+                        new Server().url(serverUrl).description(serverDescription)
                 ));
     }
 }

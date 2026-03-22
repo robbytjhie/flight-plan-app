@@ -6,7 +6,7 @@ metadata:
   labels:
     app: flightplan-backend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: flightplan-backend
@@ -33,6 +33,11 @@ spec:
           env:
 #            - name: SPRING_PROFILES_ACTIVE
 #              value: "prod"
+            - name: FLIGHT_API_INSECURE_SSL
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: FLIGHT_API_INSECURE_SSL
             - name: FLIGHT_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -49,6 +54,13 @@ spec:
                 secretKeyRef:
                   name: flightplan-secrets
                   key: CORS_ALLOWED_ORIGINS
+            - name: OPENAPI_SERVER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: OPENAPI_SERVER_URL
+            - name: OPENAPI_SERVER_DESCRIPTION
+              value: "Staging"
             # Redis leader election
             - name: REDIS_HOST
               value: "redis"

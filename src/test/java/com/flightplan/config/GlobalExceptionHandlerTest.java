@@ -2,20 +2,24 @@ package com.flightplan.config;
 
 import com.flightplan.controller.FlightController;
 import com.flightplan.service.FlightService;
-import jakarta.validation.ConstraintViolationException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.HttpMethod;
+import static org.assertj.core.api.Assertions.assertThat;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.ProblemDetail;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Set;
 
 import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -46,7 +50,7 @@ class GlobalExceptionHandlerTest {
     @Autowired
     MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     FlightService flightService;
 
     // ── Branch 1: IllegalArgumentException → 400 ─────────────────────
@@ -91,7 +95,7 @@ class GlobalExceptionHandlerTest {
                             .param("callsign", "<xss>"))
                     .andExpect(status().isBadRequest())
                     .andExpect(jsonPath("$.type").value(
-                            containsString("flightplan.example.gov.sg/errors")));
+                            containsString("flightplan.example.io/errors")));
         }
     }
 
@@ -227,16 +231,18 @@ class GlobalExceptionHandlerTest {
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.timestamp").exists())
                     .andExpect(jsonPath("$.type").value(
-                            containsString("flightplan.example.gov.sg/errors/internal")));
+                            containsString("flightplan.example.io/errors/internal")));
         }
 
         @Test
         @DisplayName("NullPointerException from service is handled as 500")
         void nullPointerExceptionHandledAs500() throws Exception {
-            when(flightService.getAirways())
+            // Use /api/flights (always permitted) to trigger the 500 path —
+            // /api/geopoints/** is blocked externally (403) and cannot reach the handler.
+            when(flightService.getAllFlightPlans())
                     .thenThrow(new NullPointerException("null ref in service"));
 
-            mockMvc.perform(get("/api/geopoints/airways"))
+            mockMvc.perform(get("/api/flights"))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.title").value("Internal Server Error"));
         }
@@ -250,5 +256,57 @@ class GlobalExceptionHandlerTest {
             mockMvc.perform(get("/api/flights/SIA200"))
                     .andExpect(status().isInternalServerError());
         }
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for swagger-ui path directly")
+    void swaggerPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "swagger-ui/index.html");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
+        assertThat(result.getTitle()).isEqualTo("Not Found");
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for v3/api-docs path directly")
+    void apiDocsPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "v3/api-docs/swagger-config");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 404 for webjars/ path directly")
+    void webjarsPathReturns404Direct() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = new NoResourceFoundException(
+                HttpMethod.GET, "webjars/swagger-ui/swagger-ui-bundle.js");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(404);
+        assertThat(result.getTitle()).isEqualTo("Not Found");
+    }
+
+    @Test
+    @DisplayName("handleNoResource returns 400 when resource path is null (non-swagger branch)")
+    void handleNoResourceNullPathReturns400() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+        NoResourceFoundException ex = mock(NoResourceFoundException.class);
+        when(ex.getResourcePath()).thenReturn(null);
+        when(ex.getMessage()).thenReturn("Resource not found");
+
+        ProblemDetail result = handler.handleNoResource(ex, null);
+
+        assertThat(result.getStatus()).isEqualTo(400);
+        assertThat(result.getTitle()).isEqualTo("Invalid Request");
     }
 }

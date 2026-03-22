@@ -54,7 +54,7 @@ public class RedisConfig {
         }
 
         log.info("[REDIS] Configuring connection factory for {}:{} (auth={})",
-                redisHost, redisPort, !redisPassword.isBlank());
+                redisHost, redisPort, redisPassword != null && !redisPassword.isBlank());
 
         return new LettuceConnectionFactory(config);
     }

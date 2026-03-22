@@ -13,6 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -169,6 +170,28 @@ class FlightServiceTest {
             assertThat(service.resolveRoute("XXXXXX")).isEmpty();
         }
 
+        @Test @DisplayName("fix multimap snapshot is reused when lastRefreshed is unchanged across resolveRoute calls")
+        void multimapSnapshotReusedWhenLastRefreshedStable() {
+            stubCache(List.of(buildSia200()));
+            Instant ts = Instant.parse("2025-06-01T12:00:00Z");
+            when(flightDataCache.getLastRefreshed()).thenReturn(ts);
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            // buildFixMultiMap() calls getFixes() once per snapshot rebuild only
+            verify(flightDataCache, times(1)).getFixes();
+        }
+
+        @Test @DisplayName("fix multimap rebuilds when lastRefreshed changes between resolveRoute calls")
+        void multimapRebuiltWhenLastRefreshedChanges() {
+            stubCache(List.of(buildSia200()));
+            when(flightDataCache.getLastRefreshed()).thenReturn(
+                    Instant.parse("2025-06-01T12:00:00Z"),
+                    Instant.parse("2025-06-02T12:00:00Z"));
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            verify(flightDataCache, times(2)).getFixes();
+        }
+
         @Test @DisplayName("returns resolved FlightRoute for SIA200")
         void resolvesValidRoute() {
             stubCache(List.of(buildSia200()));
@@ -197,6 +220,38 @@ class FlightServiceTest {
             List<FlightRoute.RoutePoint> pts = service.resolveRoute("SIA200").orElseThrow().getRoutePoints();
             assertThat(pts.get(pts.size() - 1).getName()).isEqualTo("YSSY");
             assertThat(pts.get(pts.size() - 1).getType()).isEqualTo("airport");
+        }
+
+        @Test @DisplayName("MAS370 mock route skips second M646 airway vertex when coords duplicate earlier leg")
+        void mas370SkipsDuplicateM646AirwayVertex() {
+            MockDataService mockData = new MockDataService();
+            when(flightDataCache.getFlightPlans()).thenReturn(
+                    mockData.getMockFlightPlans().stream()
+                            .filter(p -> "MAS370".equals(p.getAircraftIdentification()))
+                            .toList());
+            when(flightDataCache.getFixes()).thenReturn(mockData.getMockFixes());
+            when(flightDataCache.getAirways()).thenReturn(mockData.getMockAirways());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("MAS370").orElseThrow();
+            long m646 = r.getRoutePoints().stream().filter(p -> "M646".equals(p.getName())).count();
+            assertThat(m646).isLessThanOrEqualTo(1);
+        }
+
+        @Test @DisplayName("GIA723 default mock route resolves with WIII departure")
+        void gia723DefaultMockRouteResolves() {
+            MockDataService mockData = new MockDataService();
+            when(flightDataCache.getFlightPlans()).thenReturn(
+                    mockData.getMockFlightPlans().stream()
+                            .filter(p -> "GIA723".equals(p.getAircraftIdentification()))
+                            .toList());
+            when(flightDataCache.getFixes()).thenReturn(mockData.getMockFixes());
+            when(flightDataCache.getAirways()).thenReturn(mockData.getMockAirways());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("GIA723").orElseThrow();
+            assertThat(r.getPolyline()).hasSizeGreaterThanOrEqualTo(2);
+            assertThat(r.getRoutePoints().get(0).getName()).isEqualTo("WIII");
         }
 
         @Test @DisplayName("polyline has same count as routePoints")
@@ -252,6 +307,668 @@ class FlightServiceTest {
             plan.getFiledRoute().getRouteElement().add(unknown);
             stubCache(List.of(plan));
             assertThat(service.resolveRoute("SIA200")).isPresent();
+        }
+
+        @Test @DisplayName("name-only airway in fix map (lat=0,lon=0) is skipped from polyline — no Gulf of Guinea lines")
+        void nameOnlyAirwaySkippedFromPolyline() {
+            // UA401 exists in the airways list as name-only (lat=0, lon=0).
+            // It must NOT appear as a polyline vertex — that would draw a line to the Gulf of Guinea.
+            FlightPlan plan = buildSia200();
+            // Add a route element whose airway field is a name-only entry
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("PARDI");
+            pos.setLat(1.10);
+            pos.setLon(104.20);
+            el.setPosition(pos);
+            el.setAirway("UA401");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            // UA401 is a name-only airway — stored with lat=0, lon=0
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("UA401", 0.0, 0.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+
+            // UA401 must not appear in the polyline
+            boolean zeroZeroInPolyline = route.getPolyline().stream()
+                    .anyMatch(p -> p[0] == 0.0 && p[1] == 0.0);
+            assertThat(zeroZeroInPolyline)
+                    .as("(0,0) must not appear in polyline — name-only airway should be skipped")
+                    .isFalse();
+
+            // UA401 must not appear in routePoints either
+            boolean ua401InPoints = route.getRoutePoints().stream()
+                    .anyMatch(p -> "UA401".equals(p.getName()));
+            assertThat(ua401InPoints)
+                    .as("name-only airway UA401 must not appear as a route point")
+                    .isFalse();
+        }
+
+        @Test @DisplayName("waypoint with (0,0) in fix map is skipped from polyline")
+        void waypointWithZeroCoordsInFixMapSkipped() {
+            // If a waypoint name resolves to a name-only entry (0,0) in the fix map,
+            // it must be skipped — not drawn as a Gulf of Guinea point.
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("NOCOORD");
+            pos.setLat(0.0); // no inline coords
+            pos.setLon(0.0);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            // NOCOORD is in the fix map but with (0,0) — name-only
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("NOCOORD", 0.0, 0.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+
+            boolean zeroZeroInPolyline = route.getPolyline().stream()
+                    .anyMatch(p -> p[0] == 0.0 && p[1] == 0.0);
+            assertThat(zeroZeroInPolyline)
+                    .as("(0,0) must not appear in polyline")
+                    .isFalse();
+        }
+
+        @Test @DisplayName("airway with real coords is still added to polyline")
+        void airwayWithRealCoordsAddedToPolyline() {
+            // Confirm the guard does not accidentally skip airways that DO have coordinates
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("PARDI");
+            pos.setLat(1.10);
+            pos.setLon(104.20);
+            el.setPosition(pos);
+            el.setAirway("M771"); // has real coords
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M771", 3.15, 101.70, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+
+            boolean m771InPoints = route.getRoutePoints().stream()
+                    .anyMatch(p -> "M771".equals(p.getName()));
+            assertThat(m771InPoints)
+                    .as("airway M771 with real coords should appear in route points")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("does not insert airway vertex when airway field equals designated point (avoids map dogleg)")
+        void skipRedundantAirwayWhenSameNameAsFix() {
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("WXZ1");
+            pos.setLat(-6.80);
+            pos.setLon(113.20);
+            el.setPosition(pos);
+            el.setAirway("WXZ1");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("WXZ1", -8.65, 115.22, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+            long wxz1Points = route.getRoutePoints().stream().filter(p -> "WXZ1".equals(p.getName())).count();
+            assertThat(wxz1Points).as("single fix vertex; no duplicate airway row").isEqualTo(1);
+            boolean bogusLeg = route.getPolyline().stream()
+                    .anyMatch(p -> Math.abs(p[0] - (-8.65)) < 0.01 && Math.abs(p[1] - 115.22) < 0.01);
+            assertThat(bogusLeg).as("second WXZ1 airway coords must not be drawn").isFalse();
+        }
+
+        @Test @DisplayName("skips airway representative far off dep→dest corridor vs fix (wrong-FIR duplicate)")
+        void skipSpuriousAirwayFarOffCorridor() {
+            FlightPlan plan = buildSia200();
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(5);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("FIXQ");
+            pos.setLat(-7.0);
+            pos.setLon(114.0);
+            el.setPosition(pos);
+            el.setAirway("SPUR");
+            plan.getFiledRoute().getRouteElement().add(el);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("SPUR", 50.0, 10.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA200").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "SPUR".equals(p.getName())))
+                    .as("European duplicate must not create a route point")
+                    .isTrue();
+            assertThat(route.getPolyline().stream().noneMatch(p -> Math.abs(p[0] - 50.0) < 0.01))
+                    .as("spurious airway lat must not appear in polyline")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("skips airway vertex when wp→airway→next is a large detour vs wp→next (double line on map)")
+        void skipAirwayWhenDetourVersusNextFix() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("detour-01");
+            plan.setAircraftIdentification("DETOUR1");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("M774");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(-8.20);
+            p2.setLon(115.50);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("G579", -6.80, 113.20, "fix"),
+                    new GeoPoint("TAKAS", -8.20, 115.50, "fix")
+            ));
+            // Bogus M774 well south/west of the G579→TAKAS leg — large detour if inserted
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M774", -10.0, 113.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("DETOUR1").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "M774".equals(p.getName())))
+                    .as("detour airway must not be added between G579 and TAKAS")
+                    .isTrue();
+            assertThat(route.getPolyline().stream().noneMatch(p -> Math.abs(p[0] - (-10.0)) < 0.02))
+                    .as("bogus M774 lat must not appear in polyline")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("keeps airway vertex when wp→airway→next is not a large detour (midpoint on leg)")
+        void keepsAirwayWhenDetourRatioAcceptable() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-mid");
+            plan.setAircraftIdentification("COVMID");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(-8.20);
+            p2.setLon(115.50);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("G579", -6.80, 113.20, "fix"),
+                    new GeoPoint("TAKAS", -8.20, 115.50, "fix")
+            ));
+            // Roughly on the G579→TAKAS leg — total path via MIDAW should not exceed 1.2× direct
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVMID").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .as("reasonable airway on leg should still be inserted")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("when next route element is unresolvable, airway may still insert (empty next-leg optional)")
+        void airwayInsertedWhenNextElementUnresolved() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-next");
+            plan.setAircraftIdentification("COVNX");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("XXXX");
+            p2.setLat(0.0);
+            p2.setLon(0.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVNX").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .as("resolveNextLegEnd empty → detour check skipped; airway still valid")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("next leg resolved from fixes map when element has no inline coords")
+        void nextLegFromMapLookupForDetourCheck() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-map");
+            plan.setAircraftIdentification("COVMAP");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("M774");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(0.0);
+            p2.setLon(0.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("TAKAS", -8.20, 115.50, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M774", -10.0, 113.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVMAP").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "M774".equals(p.getName())))
+                    .as("detour still applied when next coords come from fix map")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("skips airway when it duplicates fix coordinates (< 3 km)")
+        void skipAirwayNearlyCoincidentWithFix() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-dup");
+            plan.setAircraftIdentification("COVDUP");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("NEAR");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(-8.20);
+            p2.setLon(115.50);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("NEAR", -6.801, 113.201, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVDUP").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "NEAR".equals(p.getName())))
+                    .as("airway ~same coords as fix must be skipped")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("last en-route element uses destination when computing next leg for airway check")
+        void lastEnRouteUsesDestForNextLegEnd() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-last");
+            plan.setAircraftIdentification("COVLAST");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("M774");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M774", -10.0, 113.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVLAST").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "M774".equals(p.getName())))
+                    .as("bogus airway vs G579→dest leg should be skipped")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("handles null position on following element when resolving next leg")
+        void nextLegEmptyWhenFollowingElementHasNullPosition() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-null");
+            plan.setAircraftIdentification("COVNULL");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            e2.setPosition(null);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVNULL").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .isTrue();
+        }
+
+        @Test @DisplayName("detour ratio not applied when direct leg < 5 km (branch guard)")
+        void airwayDetourSkippedWhenDirectLegVeryShort() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-short");
+            plan.setAircraftIdentification("COVSHORT");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("ZZZZ");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("ZZZZ");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("A");
+            p1.setLat(1.0);
+            p1.setLon(100.0);
+            e1.setPosition(p1);
+            e1.setAirway("AW1");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("B");
+            p2.setLat(1.035);
+            p2.setLon(100.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("AW1", 1.018, 100.08, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVSHORT").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "AW1".equals(p.getName())))
+                    .as("direct < 5 km → detour ratio block skipped; airway may still insert")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("detour ratio not applied when direct leg > 2000 km (branch guard)")
+        void airwayDetourSkippedWhenDirectLegVeryLong() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-long");
+            plan.setAircraftIdentification("COVLONG");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("ZZLL");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("ZZRR");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("NY");
+            p1.setLat(40.0);
+            p1.setLon(-74.0);
+            e1.setPosition(p1);
+            e1.setAirway("MIDUS");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("LA");
+            p2.setLat(34.0);
+            p2.setLon(-118.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            // No airport coords → dep/dest lat/lon null → cross-track airway filter not applied
+            when(flightDataCache.getFixes()).thenReturn(List.of());
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDUS", 37.0, -96.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVLONG").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDUS".equals(p.getName())))
+                    .as("direct > 2000 km → detour window skipped; reasonable midpoint airway kept")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("resolveElementLatLon returns empty when next fix name maps to (0,0) only")
+        void nextLegUnresolvedWhenFixIsNameOnlyZero() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-zero");
+            plan.setAircraftIdentification("COVZERO");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("ONLYZERO");
+            p2.setLat(0.0);
+            p2.setLon(0.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("ONLYZERO", 0.0, 0.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVZERO").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .as("next leg unresolvable from (0,0) name-only fix")
+                    .isTrue();
         }
 
         @Test @DisplayName("handles null filedRoute gracefully")
@@ -563,6 +1280,415 @@ class FlightServiceTest {
         }
     }
 
+    // ── resolveRoute — additional branch coverage ─────────────────────
+
+    @Nested @DisplayName("resolveRoute() — branch coverage")
+    class ResolveRouteBranchTests {
+
+        @Test @DisplayName("seqNum null on route element defaults to 0 for sort (no NPE)")
+        void nullSeqNumDefaultsToZero() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("seq-001");
+            plan.setAircraftIdentification("SEQ01");
+            plan.setFlightType("M");
+
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            plan.setDeparture(dep);
+
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            plan.setArrival(arr);
+
+            // One element with null seqNum
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(null);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("PARDI");
+            pos.setLat(1.10);
+            pos.setLon(104.20);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(el)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix"),
+                    new GeoPoint("PARDI", 1.10, 104.20, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("SEQ01").orElseThrow();
+            // PARDI should still appear in the route
+            assertThat(r.getRoutePoints().stream().anyMatch(p -> "PARDI".equals(p.getName()))).isTrue();
+        }
+
+        @Test @DisplayName("destination not duplicated when it already appears as the last route point")
+        void destinationNotDuplicatedWhenAlreadyLastPoint() {
+            // Build a plan where the last waypoint in the filed route IS the destination airport
+            FlightPlan plan = new FlightPlan();
+            plan.setId("dup-001");
+            plan.setAircraftIdentification("DUP01");
+            plan.setFlightType("M");
+
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            plan.setDeparture(dep);
+
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            plan.setArrival(arr);
+
+            // Last element is the destination itself, with real coords
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(1);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("YSSY");
+            pos.setLat(-33.9461);
+            pos.setLon(151.1772);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(el)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("DUP01").orElseThrow();
+            long yssyCount = r.getRoutePoints().stream()
+                    .filter(p -> "YSSY".equals(p.getName())).count();
+            assertThat(yssyCount).isEqualTo(1);
+        }
+
+        @Test @DisplayName("airway reference with blank name is skipped (no blank-name route point added)")
+        void blankAirwayNameSkipped() {
+            FlightPlan plan = buildSia200();
+            // Set the airway to a blank string (not DCT, not null, but blank)
+            plan.getFiledRoute().getRouteElement().get(1).setAirway("   ");
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("SIA200").orElseThrow();
+            // No blank-named route point should appear
+            assertThat(r.getRoutePoints().stream().anyMatch(p -> p.getName() == null || p.getName().isBlank())).isFalse();
+        }
+    }
+
+    // ── resolveAlternateRoute — additional branch coverage ────────────
+
+    @Nested @DisplayName("resolveAlternateRoute() — branch coverage")
+    class ResolveAlternateRouteBranchTests {
+
+        @Test @DisplayName("null polyline entry is skipped without NPE")
+        void nullPolylineEntrySkipped() {
+            // Build a plan whose inline coords will produce a route, then we
+            // manually inject a null into the polyline via a secondary mock.
+            // Since polyline is built internally, we test the guard indirectly
+            // by using an alternate path: p==null guard is in the intermediate
+            // loop. We simulate this via a custom route with 3 points.
+            FlightPlan plan = new FlightPlan();
+            plan.setId("np-001");
+            plan.setAircraftIdentification("NP01");
+            plan.setFlightType("M");
+
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            plan.setDeparture(dep);
+
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            plan.setArrival(arr);
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            FlightPlan.RouteElement mid = new FlightPlan.RouteElement();
+            mid.setSeqNum(1);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("PARDI");
+            pos.setLat(1.10);
+            pos.setLon(104.20);
+            mid.setPosition(pos);
+            mid.setAirway("DCT");
+            fr.setRouteElement(new ArrayList<>(List.of(mid)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix"),
+                    new GeoPoint("PARDI", 1.10, 104.20, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            // Must not throw; alternate route has same number of points as primary
+            FlightRoute primary = service.resolveRoute("NP01").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("NP01").orElseThrow();
+            assertThat(alt.getPolyline()).hasSize(primary.getPolyline().size());
+        }
+
+        @Test @DisplayName("sign branch: both hash values cover positive and negative offset sides")
+        void signBranchBothSidesCovered() {
+            // Two different callsigns will produce different hash values, covering
+            // both the sign==+1.0 and sign==-1.0 branch in resolveAlternateRoute.
+            // We simply need both to run without error and produce valid polylines.
+            when(flightDataCache.getFixes()).thenReturn(fullFixList());
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            // Callsign with even hash → sign +1; odd hash → sign -1
+            // Rather than predicting hashes, test enough different callsigns
+            // that both branches are exercised across them.
+            for (String cs : List.of("SIA200", "EK432", "QF001", "BA018")) {
+                FlightPlan plan = buildSia200();
+                plan.setAircraftIdentification(cs);
+                when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+                Optional<FlightRoute> alt = service.resolveAlternateRoute(cs);
+                assertThat(alt).isPresent();
+                assertThat(alt.get().getPolyline()).isNotEmpty();
+            }
+        }
+
+        @Test @DisplayName("alternate returns primary unchanged when polyline has no resolvable vertex at index 0")
+        void alternateReturnsPrimaryWhenStartUnresolvable() {
+            List<double[]> poly = new ArrayList<>();
+            poly.add(null);
+            poly.add(null);
+
+            FlightRoute primary = new FlightRoute();
+            primary.setCallsign("ALTNULL");
+            primary.setPolyline(poly);
+            primary.setRoutePoints(List.of());
+
+            FlightService spySvc = spy(service);
+            doReturn(Optional.of(primary)).when(spySvc).resolveRoute("ALTNULL");
+
+            Optional<FlightRoute> altOpt = spySvc.resolveAlternateRoute("ALTNULL");
+            assertThat(altOpt).isPresent();
+            assertThat(altOpt.get()).isSameAs(primary);
+        }
+
+        @Test @DisplayName("alternate resolves null middle polyline vertex via neighbour and keeps endpoints pinned")
+        void alternateResolvesNullMiddleVertex() {
+            List<double[]> poly = new ArrayList<>();
+            poly.add(new double[]{1.0, 100.0});
+            poly.add(null);
+            poly.add(new double[]{-33.0, 151.0});
+
+            FlightRoute primary = new FlightRoute();
+            primary.setCallsign("ALTMID");
+            primary.setPolyline(poly);
+            primary.setRoutePoints(List.of(
+                    new FlightRoute.RoutePoint("DEP", 1.0, 100.0, "airport", 0),
+                    new FlightRoute.RoutePoint("MID", 1.0, 100.0, "waypoint", 1),
+                    new FlightRoute.RoutePoint("DST", -33.0, 151.0, "airport", 999)));
+
+            FlightService spySvc = spy(service);
+            doReturn(Optional.of(primary)).when(spySvc).resolveRoute("ALTMID");
+
+            FlightRoute alt = spySvc.resolveAlternateRoute("ALTMID").orElseThrow();
+            assertThat(alt.getPolyline()).hasSize(3);
+            assertThat(alt.getPolyline().get(0)).containsExactly(1.0, 100.0);
+            assertThat(alt.getPolyline().get(2)).containsExactly(-33.0, 151.0);
+        }
+
+        @Test @DisplayName("alternate treats NaN polyline vertex as invalid and falls back to neighbour")
+        void alternateFallsBackForNaNVertex() {
+            List<double[]> poly = new ArrayList<>();
+            poly.add(new double[]{0.5, 99.0});
+            poly.add(new double[]{Double.NaN, 100.0});
+            poly.add(new double[]{1.5, 101.0});
+
+            FlightRoute primary = new FlightRoute();
+            primary.setCallsign("ALTNAN");
+            primary.setPolyline(poly);
+            primary.setRoutePoints(List.of(
+                    new FlightRoute.RoutePoint("A", 0.5, 99.0, "airport", 0),
+                    new FlightRoute.RoutePoint("B", 0.0, 0.0, "waypoint", 1),
+                    new FlightRoute.RoutePoint("C", 1.5, 101.0, "airport", 999)));
+
+            FlightService spySvc = spy(service);
+            doReturn(Optional.of(primary)).when(spySvc).resolveRoute("ALTNAN");
+
+            FlightRoute alt = spySvc.resolveAlternateRoute("ALTNAN").orElseThrow();
+            assertThat(alt.getPolyline()).hasSize(3);
+            assertThat(alt.getPolyline().get(0)).containsExactly(0.5, 99.0);
+            assertThat(alt.getPolyline().get(2)).containsExactly(1.5, 101.0);
+        }
+
+        @Test @DisplayName("alternate: zero-length prev→next at middle vertex skips perpendicular offset (norm ≤ 1e-9)")
+        void alternateSkipsOffsetWhenPrevEqualsNextDelta() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("alt-norm");
+            plan.setAircraftIdentification("ALTNORM");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("D1");
+            p1.setLat(5.0);
+            p1.setLon(100.0);
+            e1.setPosition(p1);
+            e1.setAirway("DCT");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("D2");
+            p2.setLat(5.0);
+            p2.setLon(100.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.RouteElement e3 = new FlightPlan.RouteElement();
+            e3.setSeqNum(3);
+            FlightPlan.Position p3 = new FlightPlan.Position();
+            p3.setDesignatedPoint("D3");
+            p3.setLat(5.0);
+            p3.setLon(100.0);
+            e3.setPosition(p3);
+            e3.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2, e3)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute primary = service.resolveRoute("ALTNORM").orElseThrow();
+            FlightRoute alt = service.resolveAlternateRoute("ALTNORM").orElseThrow();
+            assertThat(alt.getPolyline()).hasSameSizeAs(primary.getPolyline());
+            // Index 2: prev and next both (5,100) → degenerate segment → lat/lon unchanged
+            assertThat(alt.getPolyline().get(2)[0]).isEqualTo(5.0);
+            assertThat(alt.getPolyline().get(2)[1]).isEqualTo(100.0);
+        }
+    }
+
+    // ── bestCandidate — Tier 2 (single endpoint known) ──────────────────
+
+    @Nested @DisplayName("bestCandidate() — Tier 2 single-endpoint disambiguation")
+    class BestCandidateTier2DefensiveTests {
+
+        /**
+         * Tier 1 runs when both dep and dest coordinates are known. Here dest is absent
+         * from the fix map, so Tier 2 picks the duplicate waypoint closest to departure.
+         */
+        @Test @DisplayName("Tier 2 dep-only: picks closest to departure when dest not in fix map")
+        void tier2DepOnly_destMissingFromFixMap() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("t2-001");
+            plan.setAircraftIdentification("T2DEP");
+            plan.setFlightType("M");
+
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            plan.setDeparture(dep);
+
+            // Destination is NOT in the fix map → destGeo will be null → destLat/destLon null
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("ZZZZ");
+            plan.setArrival(arr);
+
+            // Duplicate waypoint DUPW — one near Singapore (correct), one in Europe (wrong)
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(1);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("DUPW");
+            pos.setLat(0.0);
+            pos.setLon(0.0); // force fix-map lookup
+            el.setPosition(pos);
+            el.setAirway("DCT");
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(el)));
+            plan.setFiledRoute(fr);
+
+            GeoPoint nearSingapore = new GeoPoint("DUPW", 1.5, 104.5, "fix");  // ~30 km from WSSS
+            GeoPoint inEurope      = new GeoPoint("DUPW", 48.0, 16.0, "fix"); // ~9000 km from WSSS
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    nearSingapore, inEurope));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("T2DEP").orElseThrow();
+
+            // The Singapore-region DUPW should be chosen over the European one
+            Optional<FlightRoute.RoutePoint> dupw = r.getRoutePoints().stream()
+                    .filter(p -> "DUPW".equals(p.getName())).findFirst();
+            assertThat(dupw).isPresent();
+            assertThat(dupw.get().getLat()).isCloseTo(1.5, org.assertj.core.data.Offset.offset(0.1));
+        }
+
+        @Test @DisplayName("Tier 2 dest-only: picks closest to destination when dep not in fix map")
+        void tier2DestOnly_depMissingFromFixMap() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("t2-002");
+            plan.setAircraftIdentification("T2DST");
+            plan.setFlightType("M");
+
+            // Departure NOT in fix map
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("ZZZZ");
+            plan.setDeparture(dep);
+
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(1);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint("DUPW");
+            pos.setLat(0.0);
+            pos.setLon(0.0);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(el)));
+            plan.setFiledRoute(fr);
+
+            GeoPoint nearSydney = new GeoPoint("DUPW", -33.0, 151.0, "fix");  // ~100 km from YSSY
+            GeoPoint inEurope   = new GeoPoint("DUPW", 48.0, 16.0, "fix");   // ~16000 km from YSSY
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix"),
+                    nearSydney, inEurope));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute r = service.resolveRoute("T2DST").orElseThrow();
+
+            Optional<FlightRoute.RoutePoint> dupw = r.getRoutePoints().stream()
+                    .filter(p -> "DUPW".equals(p.getName())).findFirst();
+            assertThat(dupw).isPresent();
+            assertThat(dupw.get().getLat()).isCloseTo(-33.0, org.assertj.core.data.Offset.offset(0.1));
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────
 
     private FlightPlan buildSia200() {
@@ -700,5 +1826,532 @@ class FlightServiceTest {
         route.setRouteElement(new ArrayList<>(List.of(e1, e2, e3, e4)));
         fp.setFiledRoute(route);
         return fp;
+    }
+
+    // ── Fix map caching ───────────────────────────────────────────────────────
+
+    /**
+     * Tests for getCachedFixMap() — verifies that the 247K-entry fix map is built
+     * once per cache refresh cycle and not rebuilt on every resolveRoute() call.
+     *
+     * Strategy: stub getLastRefreshed() to return a fixed Instant, call resolveRoute()
+     * multiple times, and assert that getFixes() / getAirways() are only called once
+     * (the first build). Changing the Instant simulates a leader cache refresh and
+     * verifies the map is rebuilt exactly once more.
+     */
+    @Nested @DisplayName("fix map caching")
+    class FixMapCachingTests {
+
+        private final Instant T1 = Instant.parse("2026-03-20T10:00:00Z");
+        private final Instant T2 = Instant.parse("2026-03-20T10:10:00Z");
+
+        private FlightPlan simplePlan(String callsign) {
+            FlightPlan fp = new FlightPlan();
+            fp.setAircraftIdentification(callsign);
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WSSS");
+            fp.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("YSSY");
+            fp.setArrival(arr);
+            FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+            route.setRouteElement(new ArrayList<>());
+            fp.setFiledRoute(route);
+            return fp;
+        }
+
+        @Test
+        @DisplayName("getFixes() and getAirways() are called once for multiple resolveRoute() calls with same lastRefreshed")
+        void fixMapBuiltOnlyOncePerRefreshCycle() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix"),
+                    new GeoPoint("YSSY", -33.94, 151.17, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+
+            // Three calls with the same lastRefreshed timestamp
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+
+            // Fix map should only have been built once — getFixes/getAirways called once each
+            verify(flightDataCache, times(1)).getFixes();
+            verify(flightDataCache, times(1)).getAirways();
+        }
+
+        @Test
+        @DisplayName("fix map is rebuilt exactly once when lastRefreshed changes (leader refresh)")
+        void fixMapRebuiltAfterCacheRefresh() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix"),
+                    new GeoPoint("YSSY", -33.94, 151.17, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            // First refresh cycle — two calls, map built once
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+            verify(flightDataCache, times(1)).getFixes();
+
+            // Leader refreshes the cache — timestamp changes
+            when(flightDataCache.getLastRefreshed()).thenReturn(T2);
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+
+            // getFixes should now have been called exactly twice total (once per refresh)
+            verify(flightDataCache, times(2)).getFixes();
+            verify(flightDataCache, times(2)).getAirways();
+        }
+
+        @Test
+        @DisplayName("fix map is built on first call when snapshot is null (cold start)")
+        void fixMapBuiltOnColdStart() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+
+            // Fresh service instance — snapshot is null
+            FlightService freshService = new FlightService(flightDataCache);
+            freshService.resolveRoute("SIA200");
+
+            verify(flightDataCache, times(1)).getFixes();
+            verify(flightDataCache, times(1)).getAirways();
+        }
+
+        @Test
+        @DisplayName("fix map built from null lastRefreshed (cache not yet refreshed) and reused")
+        void fixMapWorksWithNullLastRefreshed() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(null);
+
+            service.resolveRoute("SIA200");
+            service.resolveRoute("SIA200");
+
+            // Null timestamp is a valid key — map still built only once
+            verify(flightDataCache, times(1)).getFixes();
+        }
+
+        @Test
+        @DisplayName("routes are correctly resolved using the cached fix map")
+        void cachedFixMapProducesCorrectRoute() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.3644, 103.9915, "fix"),
+                    new GeoPoint("YSSY", -33.9461, 151.1772, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(T1);
+
+            Optional<FlightRoute> route = service.resolveRoute("SIA200");
+
+            assertThat(route).isPresent();
+            assertThat(route.get().getDepartureAerodrome()).isEqualTo("WSSS");
+            assertThat(route.get().getDestinationAerodrome()).isEqualTo("YSSY");
+            assertThat(route.get().getPolyline()).hasSize(2);
+
+            // Call again — same result, still from cache
+            Optional<FlightRoute> route2 = service.resolveRoute("SIA200");
+            assertThat(route2).isPresent();
+            assertThat(route2.get().getPolyline()).hasSize(2);
+
+            // Map only built once
+            verify(flightDataCache, times(1)).getFixes();
+        }
+
+        @Test
+        @DisplayName("each N-minute refresh cycle triggers exactly one map rebuild regardless of call volume")
+        void exactlyOneRebuildPerRefreshCycle() {
+            FlightPlan plan = simplePlan("SIA200");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS", 1.36, 103.99, "fix")));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+
+            // Simulate three 10-minute refresh cycles with 5 requests each
+            Instant[] cycles = {
+                Instant.parse("2026-03-20T10:00:00Z"),
+                Instant.parse("2026-03-20T10:10:00Z"),
+                Instant.parse("2026-03-20T10:20:00Z")
+            };
+
+            for (Instant cycle : cycles) {
+                when(flightDataCache.getLastRefreshed()).thenReturn(cycle);
+                for (int i = 0; i < 5; i++) {
+                    service.resolveRoute("SIA200");
+                }
+            }
+
+            // 3 cycles × 1 rebuild each = 3 total getFixes calls
+            verify(flightDataCache, times(3)).getFixes();
+            verify(flightDataCache, times(3)).getAirways();
+        }
+    }
+
+    // ── 4-tier duplicate disambiguation ──────────────────────────────────────
+
+    /**
+     * Tests for the 4-tier bestCandidate() disambiguation chain.
+     *
+     * The upstream fixes dataset contains 12 230 waypoint names that appear more
+     * than once with different coordinates in different FIRs worldwide. These tests
+     * verify that resolveRoute() picks the geographically correct candidate by
+     * working through a prioritised fallback chain from strongest to weakest context:
+     *
+     *   Tier 1 — Cross-track distance (both dep + dest known)
+     *   Tier 2 — Closest to nearest known endpoint (only dep OR dest known)
+     *   Tier 3 — Closest to centroid of already-resolved route points
+     *   Tier 4 — First valid-coord entry (absolute last resort)
+     *
+     * The canonical test case is SUNIR on the FAOR→WSSS (Johannesburg→Singapore)
+     * route, which has two entries in the upstream dataset:
+     *
+     *   SUNIR (-24.30,  40.00) — Indian Ocean near Madagascar  ✅ correct
+     *   SUNIR ( 43.39,  -3.13) — Northern Spain                ❌ wrong
+     *
+     * Cross-track distances from the FAOR→WSSS great-circle path:
+     *   Correct fix:   9 km  (lies almost exactly on the flight path)
+     *   Wrong fix:  7650 km  (completely off the route)
+     */
+    @Nested @DisplayName("4-tier duplicate disambiguation")
+    class DisambiguationTests {
+
+        // FAOR (Johannesburg O.R. Tambo) and WSSS (Singapore Changi) anchor coords
+        private static final double FAOR_LAT  = -26.13;
+        private static final double FAOR_LON  =  28.24;
+        private static final double WSSS_LAT  =   1.36;
+        private static final double WSSS_LON  = 103.99;
+
+        /**
+         * Builds a minimal flight plan with a single en-route waypoint whose
+         * name must be resolved from the fixes multimap.
+         */
+        private FlightPlan planWithWaypoint(String dep, String dest, String waypointName) {
+            FlightPlan fp = new FlightPlan();
+            fp.setAircraftIdentification("SIA481");
+
+            FlightPlan.Departure d = new FlightPlan.Departure();
+            d.setDepartureAerodrome(dep);
+            fp.setDeparture(d);
+
+            FlightPlan.Arrival a = new FlightPlan.Arrival();
+            a.setDestinationAerodrome(dest);
+            fp.setArrival(a);
+
+            FlightPlan.RouteElement el = new FlightPlan.RouteElement();
+            el.setSeqNum(1);
+            FlightPlan.Position pos = new FlightPlan.Position();
+            pos.setDesignatedPoint(waypointName);
+            pos.setLat(0.0); // no inline coords — forces fix map lookup
+            pos.setLon(0.0);
+            el.setPosition(pos);
+            el.setAirway("DCT");
+
+            FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+            route.setRouteElement(new ArrayList<>(List.of(el)));
+            fp.setFiledRoute(route);
+            return fp;
+        }
+
+        @Test
+        @DisplayName("Tier 1 — SUNIR: picks Madagascar (-24.30,40.00) not Spain (43.39,-3.13) via cross-track on FAOR→WSSS")
+        void tier1_sunirCorrectCandidateViaCrossTrack() {
+            // The canonical real-world regression. Both FAOR and WSSS are in the fixes
+            // dataset, so Tier 1 (cross-track) runs. The Madagascar SUNIR is 9 km from
+            // the FAOR→WSSS great-circle path; the Spain one is 7 650 km away.
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "SUNIR");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR", FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS", WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("SUNIR", -24.30,  40.00, "fix"),  // Indian Ocean — correct
+                    new GeoPoint("SUNIR",  43.39,  -3.13, "fix")   // Spain — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint sunir = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "SUNIR".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("SUNIR not in route"));
+
+            assertThat(sunir.getLat()).as("should be Madagascar lat, not Spain").isEqualTo(-24.30);
+            assertThat(sunir.getLon()).as("should be Indian Ocean lon, not Spain").isEqualTo(40.00);
+        }
+
+        @Test
+        @DisplayName("Tier 1 — Spain SUNIR never appears in polyline")
+        void tier1_spainSunirAbsentFromPolyline() {
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "SUNIR");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR", FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS", WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("SUNIR", -24.30, 40.00, "fix"),
+                    new GeoPoint("SUNIR",  43.39, -3.13, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            boolean spainInPolyline = service.resolveRoute("SIA481").orElseThrow()
+                    .getPolyline().stream()
+                    .anyMatch(p -> Double.compare(p[0], 43.39) == 0
+                               && Double.compare(p[1], -3.13) == 0);
+            assertThat(spainInPolyline).as("Spain SUNIR must not appear in polyline").isFalse();
+        }
+
+        @Test
+        @DisplayName("Tier 2 — picks closest to departure when only dep is known")
+        void tier2_closestToDepartureWhenOnlyDepKnown() {
+            // WSSS not in fixes — Tier 1 (cross-track) unavailable.
+            // FAOR is known, so Tier 2 uses proximity to departure.
+            // DUPWP-A is 500 km from FAOR; DUPWP-B is 8000 km away.
+            FlightPlan plan = planWithWaypoint("FAOR", "UNKN", "DUPWP");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR",  FAOR_LAT, FAOR_LON, "fix"),
+                    // UNKN intentionally absent from fixes
+                    new GeoPoint("DUPWP", -22.0, 30.0,  "fix"),   // ~500 km from FAOR — correct
+                    new GeoPoint("DUPWP",  50.0, 10.0,  "fix")    // ~8000 km from FAOR — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint wp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(wp.getLat()).as("should pick candidate near FAOR").isEqualTo(-22.0);
+        }
+
+        @Test
+        @DisplayName("Tier 2 — picks closest to destination when only dest is known")
+        void tier2_closestToDestinationWhenOnlyDestKnown() {
+            // FAOR not in fixes — dep anchor unavailable.
+            // WSSS is known, so Tier 2 uses proximity to destination.
+            FlightPlan plan = planWithWaypoint("UNKN", "WSSS", "DUPWP");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WSSS",  WSSS_LAT, WSSS_LON, "fix"),
+                    // UNKN intentionally absent
+                    new GeoPoint("DUPWP",  3.0, 101.0, "fix"),    // ~350 km from WSSS — correct
+                    new GeoPoint("DUPWP", 50.0,  10.0, "fix")     // ~9000 km from WSSS — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint wp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(wp.getLat()).as("should pick candidate near WSSS").isEqualTo(3.0);
+        }
+
+        @Test
+        @DisplayName("Tier 3 — picks closest to centroid of resolved points when no endpoint known")
+        void tier3_closestToCentroidOfResolvedPoints() {
+            // Neither UNKN dep nor UNKN dest is in fixes.
+            // A prior waypoint PREV has already been resolved at (1.0, 50.0).
+            // The second duplicate waypoint DUPWP should pick the candidate
+            // closest to that centroid (1.0, 50.0).
+            FlightPlan fp = new FlightPlan();
+            fp.setAircraftIdentification("SIA481");
+            FlightPlan.Departure d = new FlightPlan.Departure();
+            d.setDepartureAerodrome("UNKN");
+            fp.setDeparture(d);
+            FlightPlan.Arrival a = new FlightPlan.Arrival();
+            a.setDestinationAerodrome("UNKN");
+            fp.setArrival(a);
+
+            // Two sequential waypoints: PREV (unique, near Indian Ocean) then DUPWP (duplicate)
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("PREV");
+            p1.setLat(0.0); p1.setLon(0.0);
+            e1.setPosition(p1); e1.setAirway("DCT");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("DUPWP");
+            p2.setLat(0.0); p2.setLon(0.0);
+            e2.setPosition(p2); e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute route = new FlightPlan.FiledRoute();
+            route.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            fp.setFiledRoute(route);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(fp));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("PREV",  1.0, 50.0,  "fix"),  // resolved first, centroid ~(1,50)
+                    new GeoPoint("DUPWP", 2.0, 52.0,  "fix"),  // ~300 km from centroid — correct
+                    new GeoPoint("DUPWP", 60.0, -20.0, "fix")  // far from centroid — wrong
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint dupwp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(dupwp.getLat()).as("should pick candidate near centroid of PREV").isEqualTo(2.0);
+        }
+
+        @Test
+        @DisplayName("Tier 4 — returns first valid-coord entry when no context available")
+        void tier4_firstValidEntryWhenNoContext() {
+            // No dep, no dest, no prior resolved points — absolute last resort.
+            FlightPlan plan = planWithWaypoint("UNKN", "UNKN", "DUPWP");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("DUPWP",  10.0, 20.0, "fix"),  // first valid entry
+                    new GeoPoint("DUPWP", -10.0, 50.0, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint wp = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "DUPWP".equals(p.getName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("DUPWP not in route"));
+
+            assertThat(wp.getLat()).as("Tier 4: first valid-coord entry").isEqualTo(10.0);
+        }
+
+        @Test
+        @DisplayName("single-entry name bypasses disambiguation and is returned directly")
+        void singleCandidateReturnedDirectly() {
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "EXOBI");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR",  FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS",  WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("EXOBI", -26.05,   29.15,    "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute.RoutePoint exobi = service.resolveRoute("SIA481").orElseThrow()
+                    .getRoutePoints().stream()
+                    .filter(p -> "EXOBI".equals(p.getName()))
+                    .findFirst().orElseThrow();
+
+            assertThat(exobi.getLat()).isEqualTo(-26.05);
+            assertThat(exobi.getLon()).isEqualTo(29.15);
+        }
+
+        @Test
+        @DisplayName("all-zero-coord candidates are never plotted — no Gulf of Guinea line")
+        void allZeroCoordsNotPlotted() {
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "NOCOORD");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR", FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS", WSSS_LAT, WSSS_LON, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("NOCOORD", 0.0, 0.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            boolean zeroInPolyline = service.resolveRoute("SIA481").orElseThrow()
+                    .getPolyline().stream()
+                    .anyMatch(p -> p[0] == 0.0 && p[1] == 0.0);
+            assertThat(zeroInPolyline).as("(0,0) must never appear in polyline").isFalse();
+        }
+
+        @Test
+        @DisplayName("multimap preserves ALL candidates — none discarded at build time")
+        void multimapPreservesAllCandidates() {
+            // Confirm buildFixMultiMap() retains every entry per name.
+            // The old flat HashMap.put() would silently drop all but the last.
+            FlightPlan plan = planWithWaypoint("FAOR", "WSSS", "SUNIR");
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("FAOR",  FAOR_LAT, FAOR_LON, "fix"),
+                    new GeoPoint("WSSS",  WSSS_LAT, WSSS_LON, "fix"),
+                    new GeoPoint("SUNIR", -24.30, 40.00, "fix"),
+                    new GeoPoint("SUNIR",  43.39, -3.13, "fix"),
+                    new GeoPoint("SUNIR",  10.00, 10.00, "fix")   // third duplicate
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of());
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("SIA481").orElseThrow();
+
+            // Cross-track (Tier 1) should still pick the Madagascar entry
+            // from all three candidates, confirming all three were available
+            route.getRoutePoints().stream()
+                    .filter(p -> "SUNIR".equals(p.getName()))
+                    .findFirst()
+                    .ifPresent(sunir -> {
+                        assertThat(sunir.getLat()).isEqualTo(-24.30);
+                        assertThat(sunir.getLon()).isEqualTo(40.00);
+                    });
+        }
+    }
+
+    /**
+     * Exercises {@link FlightService} private {@code polylineHasVertexNear} branches that are hard
+     * to hit from {@link #resolveRoute(String)} alone (null list, empty list, null polyline slot).
+     */
+    @Nested
+    @DisplayName("polylineHasVertexNear() via reflection")
+    class PolylineHasVertexNearReflectionTests {
+
+        private boolean invokeNear(List<double[]> poly, double lat, double lon, double km, int lookback)
+                throws Exception {
+            Method m = FlightService.class.getDeclaredMethod(
+                    "polylineHasVertexNear", List.class, double.class, double.class, double.class, int.class);
+            m.setAccessible(true);
+            return (Boolean) m.invoke(service, poly, lat, lon, km, lookback);
+        }
+
+        @Test
+        @DisplayName("returns false when polyline is null")
+        void falseWhenPolylineNull() throws Exception {
+            assertThat(invokeNear(null, 1.0, 2.0, 1.0, 40)).isFalse();
+        }
+
+        @Test
+        @DisplayName("returns false when polyline is empty")
+        void falseWhenPolylineEmpty() throws Exception {
+            assertThat(invokeNear(List.of(), 1.0, 2.0, 1.0, 40)).isFalse();
+        }
+
+        @Test
+        @DisplayName("skips null polyline slots and still detects a nearby vertex")
+        void skipsNullSlotAndDetectsNear() throws Exception {
+            List<double[]> pl = new ArrayList<>();
+            pl.add(null);
+            pl.add(new double[]{1.0, 2.0});
+            assertThat(invokeNear(pl, 1.0, 2.0, 0.001, 40)).isTrue();
+        }
+
+        @Test
+        @DisplayName("returns false when no vertex lies within the distance threshold")
+        void falseWhenNothingNear() throws Exception {
+            List<double[]> pl = List.of(new double[]{0.0, 0.0}, new double[]{10.0, 10.0});
+            assertThat(invokeNear(pl, 80.0, 80.0, 2.0, 40)).isFalse();
+        }
     }
 }

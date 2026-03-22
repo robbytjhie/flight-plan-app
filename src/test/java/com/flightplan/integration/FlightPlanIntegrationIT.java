@@ -296,32 +296,37 @@ class FlightPlanIntegrationIT {
         }
     }
 
-    @Nested @DisplayName("Dev Profile (mock data) — /api/geopoints")
+    @Nested @DisplayName("Dev Profile (mock data) — geopoint cache")
     class MockModeGeopointTests {
 
-        @Test @DisplayName("GET /api/geopoints/airways → 200, non-empty, type=airway")
+        // /api/geopoints/** is blocked externally (403) — that is correct behaviour.
+        // We verify geopoint data is loaded into the cache via /api/cache/status,
+        // and that route resolution (which uses the fix map internally) still works.
+
+        @Test @DisplayName("airways are loaded into cache on startup — airwaysCount > 0")
         void airwaysNonEmpty() throws Exception {
-            mockMvc.perform(get("/api/geopoints/airways"))
+            mockMvc.perform(get("/api/cache/status"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$", not(empty())))
-                    .andExpect(jsonPath("$[0].type").value("airway"))
-                    .andExpect(jsonPath("$[0].name").isNotEmpty());
+                    .andExpect(jsonPath("$.airwaysCount").value(org.hamcrest.Matchers.greaterThan(0)));
         }
 
-        @Test @DisplayName("GET /api/geopoints/fixes → 200, non-empty, type=fix")
+        @Test @DisplayName("fixes are loaded into cache on startup — fixesCount > 0")
         void fixesNonEmpty() throws Exception {
-            mockMvc.perform(get("/api/geopoints/fixes"))
+            mockMvc.perform(get("/api/cache/status"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$", not(empty())))
-                    .andExpect(jsonPath("$[0].type").value("fix"));
+                    .andExpect(jsonPath("$.fixesCount").value(org.hamcrest.Matchers.greaterThan(0)));
         }
 
-        @Test @DisplayName("WSSS has exact coordinates in fixes")
+        @Test @DisplayName("WSSS coordinates are resolved correctly via route endpoint")
         void wsssExactCoords() throws Exception {
-            mockMvc.perform(get("/api/geopoints/fixes"))
+            // WSSS appears as departure aerodrome in SIA200 mock flight.
+            // If fixes are loaded correctly, the route will contain WSSS with exact coords.
+            mockMvc.perform(get("/api/route/SIA200"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$[?(@.name=='WSSS')].lat", hasItem(1.3644)))
-                    .andExpect(jsonPath("$[?(@.name=='WSSS')].lon", hasItem(103.9915)));
+                    .andExpect(jsonPath("$.departureAerodrome").value("WSSS"))
+                    .andExpect(jsonPath("$.routePoints[0].name").value("WSSS"))
+                    .andExpect(jsonPath("$.routePoints[0].lat").value(1.3644))
+                    .andExpect(jsonPath("$.routePoints[0].lon").value(103.9915));
         }
     }
 

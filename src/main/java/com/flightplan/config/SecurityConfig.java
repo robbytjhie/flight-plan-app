@@ -67,6 +67,11 @@ public class SecurityConfig {
                                  "/v3/api-docs/**", "/v3/api-docs").permitAll()
                 // Cache status — safe to expose; contains no sensitive data
                 .requestMatchers(HttpMethod.GET, "/api/cache/status").permitAll()
+                // Geopoints are internal-only - used server-side by route resolution.
+                // The frontend never calls these directly; routes already contain resolved
+                // coordinates. Block external access to avoid exposing the raw 14 MB
+                // fixes payload or the full airway list.
+                .requestMatchers("/api/geopoints/**").denyAll()
                 .requestMatchers("/swagger-ui/**").permitAll()
                 .requestMatchers("/swagger-ui.html").permitAll()
                 .requestMatchers("/v3/api-docs/**").permitAll()

@@ -187,9 +187,12 @@ public class FlightDataCache {
     private boolean isNewer(String candidate, String current) {
         Optional<Instant> cand = parseInstant(candidate);
         Optional<Instant> curr = parseInstant(current);
-        if (cand.isPresent() && curr.isPresent()) return cand.get().isAfter(curr.get());
-        if (cand.isPresent() && curr.isEmpty()) return true;
-        return false;
+        if (cand.isPresent() && curr.isPresent()) {
+            return cand.get().isAfter(curr.get());
+        }
+        // If we get here with a parseable candidate instant, the current side has no instant —
+        // the compound "cand && curr.isEmpty()" is equivalent to "cand" alone (JaCoCo-friendly).
+        return cand.isPresent();
     }
 
     private Optional<Instant> parseInstant(String ts) {
