@@ -46,8 +46,8 @@ provider "aws" {
 # ── Variables ─────────────────────────────────────────────────────────────────
 
 variable "aws_region"           { default = "ap-southeast-1" }
-variable "app_image_tag"        { description = "ECR image tag to deploy" }
-variable "cors_allowed_origins" { description = "Comma-separated frontend origins" }
+variable "app_image_tag"        { default = "latest" }
+variable "cors_allowed_origins" { default = "http://localhost:3000" }
 variable "desired_count"        { default = 1 }                                      # 1 pod per cluster
 # variable "environment"        { description = "staging | prod" }                   # commented out — both clusters always provisioned
 # variable "domain_name"        { description = "e.g. api.flightplan.example.io" }   # commented out — ALB removed
