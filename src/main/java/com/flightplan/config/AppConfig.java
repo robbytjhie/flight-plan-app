@@ -41,7 +41,7 @@ public class AppConfig {
     // ── prod WebClient — only wired when profile = prod ───────────────────────
 
     /**
-     * TLS-enforced WebClient for the upstream Flight Manager API.
+     * TLS-enforced WebClients for the upstream Flight Manager API.
      * Only created in the prod profile — dev uses MockDataFetchStrategy instead.
      *
      * The apikey header value comes from FLIGHT_API_KEY environment variable
