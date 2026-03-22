@@ -3,12 +3,11 @@
 # Region: ap-southeast-1 (Singapore)
 #
 # Resources provisioned:
-#   VPC (2 AZ, public + private subnets)
+#   VPC (2 AZ, public + private subnets — shared by both clusters)
 #   ECR repository
-#   ECS Fargate cluster + service + task definition
-#   Application Load Balancer (HTTPS)
-#   ACM certificate (HTTPS termination at ALB)
-#   ElastiCache Redis (leader election lock)
+#   EKS cluster — flightplan-prod   (main / tags)
+#   EKS cluster — flightplan-staging (develop / feature branches)
+#   ElastiCache Redis (leader election lock — shared by both clusters)
 #   IAM roles (ECS task execution + task role)
 #   CloudWatch log groups
 #   Secrets Manager (env secrets injected into ECS tasks)
@@ -38,7 +37,7 @@ provider "aws" {
   default_tags {
     tags = {
       Project     = "flight-plan-backend"
-      Environment = var.environment
+      Environment = "shared"
       ManagedBy   = "Terraform"
     }
   }
@@ -46,39 +45,35 @@ provider "aws" {
 
 # ── Variables ─────────────────────────────────────────────────────────────────
 
-variable "aws_region"        { default = "ap-southeast-1" }
-variable "environment"       { default = "prod" }                                    # was: description = "staging | prod" — fixed to prod; flightplan-staging commented out below
-variable "app_image_tag"     { description = "ECR image tag to deploy" }
-variable "domain_name"       { description = "e.g. api.flightplan.example.io" }
-variable "acm_certificate_arn" { description = "ACM cert ARN for HTTPS on ALB" }
+variable "aws_region"           { default = "ap-southeast-1" }
+variable "app_image_tag"        { description = "ECR image tag to deploy" }
 variable "cors_allowed_origins" { description = "Comma-separated frontend origins" }
-variable "desired_count"     { default = 1 }                                         # was: 2 — reduced to 1 pod
-variable "task_cpu"          { default = 512  }
-variable "task_memory"       { default = 1024 }
+variable "desired_count"        { default = 1 }                                      # 1 pod per cluster
+# variable "environment"        { description = "staging | prod" }                   # commented out — both clusters always provisioned
+# variable "domain_name"        { description = "e.g. api.flightplan.example.io" }   # commented out — ALB removed
+# variable "acm_certificate_arn"  { description = "ACM cert ARN for HTTPS on ALB" }  # commented out — ALB removed
+# variable "task_cpu"            { default = 512  }                                   # commented out — ECS removed
+# variable "task_memory"         { default = 1024 }                                   # commented out — ECS removed
 
 # ── Data sources ──────────────────────────────────────────────────────────────
 
 data "aws_caller_identity" "current" {}
 
-data "aws_ecr_repository" "app" {
-  name = "flight-plan-backend"
-}
-
-# ── VPC ───────────────────────────────────────────────────────────────────────
+# ── VPC — shared by both clusters ─────────────────────────────────────────────
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
-  name = "flight-plan-${var.environment}"
+  name = "flight-plan-vpc"
   cidr = "10.0.0.0/16"
 
-  azs              = ["${var.aws_region}a", "${var.aws_region}b"]
-  private_subnets  = ["10.0.1.0/24", "10.0.2.0/24"]
-  public_subnets   = ["10.0.101.0/24", "10.0.102.0/24"]
+  azs             = ["${var.aws_region}a", "${var.aws_region}b"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
 
   enable_nat_gateway   = true
-  single_nat_gateway   = true                                                        # was: var.environment == "staging" — always single NAT; flightplan-staging removed
+  single_nat_gateway   = true                                                        # single NAT saves ~$35/month
   enable_dns_hostnames = true
 }
 
@@ -113,11 +108,10 @@ resource "aws_ecr_lifecycle_policy" "app" {
   })
 }
 
-# ── EKS Cluster ───────────────────────────────────────────────────────────────
-# Single cluster (flightplan-prod) replaces flightplan-prod + flightplan-staging.
-# flightplan-staging is commented out — all branches now deploy to flightplan-prod.
+# ── EKS Cluster — flightplan-prod ─────────────────────────────────────────────
+# Receives deployments from: main branch + version tags
 
-module "eks" {
+module "eks_prod" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
@@ -134,40 +128,42 @@ module "eks" {
       instance_types = ["t3.small"]
       min_size       = 1
       max_size       = 3
-      desired_size   = 1
+      desired_size   = 1                                                              # 1 pod — reduced from 2
     }
   }
 
   enable_cluster_creator_admin_permissions = true
 }
 
-# flightplan-staging cluster — commented out; use flightplan-prod for all deployments
-# module "eks_staging" {
-#   source  = "terraform-aws-modules/eks/aws"
-#   version = "~> 20.0"
-#
-#   cluster_name    = "flightplan-staging"
-#   cluster_version = "1.29"
-#
-#   vpc_id     = module.vpc.vpc_id
-#   subnet_ids = module.vpc.private_subnets
-#
-#   cluster_endpoint_public_access = true
-#
-#   eks_managed_node_groups = {
-#     default = {
-#       instance_types = ["t3.small"]
-#       min_size       = 1
-#       max_size       = 2
-#       desired_size   = 1
-#     }
-#   }
-#
-#   enable_cluster_creator_admin_permissions = true
-# }
+# ── EKS Cluster — flightplan-staging ──────────────────────────────────────────
+# Receives deployments from: develop + feature/** branches
+
+module "eks_staging" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.0"
+
+  cluster_name    = "flightplan-staging"
+  cluster_version = "1.29"
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  cluster_endpoint_public_access = true
+
+  eks_managed_node_groups = {
+    default = {
+      instance_types = ["t3.small"]
+      min_size       = 1
+      max_size       = 2
+      desired_size   = 1                                                              # 1 pod — reduced from 2
+    }
+  }
+
+  enable_cluster_creator_admin_permissions = true
+}
 
 # ── ECS Cluster ───────────────────────────────────────────────────────────────
-# commented out — replaced by EKS cluster above
+# commented out — replaced by EKS clusters above
 
 # resource "aws_ecs_cluster" "main" {
 #   name = "flight-plan-${var.environment}"
@@ -253,29 +249,30 @@ module "eks" {
 #   })
 # }
 
-# ── ElastiCache Redis (leader election) ───────────────────────────────────────
+# ── ElastiCache Redis — shared by both clusters ───────────────────────────────
+# leader election lock; both flightplan-prod and flightplan-staging connect to this instance
 
 resource "aws_elasticache_subnet_group" "redis" {
-  name       = "flight-plan-${var.environment}-redis"
+  name       = "flight-plan-redis"
   subnet_ids = module.vpc.private_subnets
 }
 
 resource "aws_security_group" "redis" {
-  name   = "flight-plan-${var.environment}-redis-sg"
+  name   = "flight-plan-redis-sg"
   vpc_id = module.vpc.vpc_id
 
   ingress {
     from_port   = 6379
     to_port     = 6379
     protocol    = "tcp"
-    cidr_blocks = [module.vpc.vpc_cidr_block]                                        # was: security_groups = [aws_security_group.ecs_tasks.id] — allow from EKS nodes via VPC CIDR
+    cidr_blocks = [module.vpc.vpc_cidr_block]                                        # allow from both EKS clusters via shared VPC CIDR
   }
 }
 
 resource "aws_elasticache_cluster" "redis" {
-  cluster_id           = "flight-plan-${var.environment}"
+  cluster_id           = "flight-plan-redis"
   engine               = "redis"
-  node_type            = "cache.t3.micro"                                             # was: var.environment == "prod" ? "cache.t3.small" : "cache.t3.micro" — fixed to micro
+  node_type            = "cache.t3.micro"                                             # was: var.environment == "prod" ? "cache.t3.small" : "cache.t3.micro"
   num_cache_nodes      = 1
   parameter_group_name = "default.redis7"
   engine_version       = "7.0"
@@ -515,10 +512,12 @@ resource "aws_elasticache_cluster" "redis" {
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
 
-# output "alb_dns_name"      { value = aws_lb.main.dns_name }                        # commented out — ALB removed
-output "ecr_repository_url" { value = aws_ecr_repository.app.repository_url }
-output "redis_endpoint"     { value = aws_elasticache_cluster.redis.cache_nodes[0].address }
-output "eks_cluster_name"   { value = module.eks.cluster_name }
-output "eks_cluster_endpoint" { value = module.eks.cluster_endpoint }
-# output "ecs_cluster_name"  { value = aws_ecs_cluster.main.name }                   # commented out — ECS cluster removed
-# output "ecs_service_name"  { value = aws_ecs_service.app.name }                    # commented out — ECS service removed
+output "ecr_repository_url"           { value = aws_ecr_repository.app.repository_url }
+output "redis_endpoint"               { value = aws_elasticache_cluster.redis.cache_nodes[0].address }
+output "eks_prod_cluster_name"        { value = module.eks_prod.cluster_name }
+output "eks_prod_cluster_endpoint"    { value = module.eks_prod.cluster_endpoint }
+output "eks_staging_cluster_name"     { value = module.eks_staging.cluster_name }
+output "eks_staging_cluster_endpoint" { value = module.eks_staging.cluster_endpoint }
+# output "alb_dns_name"                { value = aws_lb.main.dns_name }               # commented out — ALB removed
+# output "ecs_cluster_name"            { value = aws_ecs_cluster.main.name }          # commented out — ECS cluster removed
+# output "ecs_service_name"            { value = aws_ecs_service.app.name }           # commented out — ECS service removed
