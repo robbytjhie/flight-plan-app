@@ -471,6 +471,302 @@ class FlightServiceTest {
                     .isTrue();
         }
 
+        @Test @DisplayName("keeps airway vertex when wp→airway→next is not a large detour (midpoint on leg)")
+        void keepsAirwayWhenDetourRatioAcceptable() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-mid");
+            plan.setAircraftIdentification("COVMID");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(-8.20);
+            p2.setLon(115.50);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("G579", -6.80, 113.20, "fix"),
+                    new GeoPoint("TAKAS", -8.20, 115.50, "fix")
+            ));
+            // Roughly on the G579→TAKAS leg — total path via MIDAW should not exceed 1.2× direct
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVMID").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .as("reasonable airway on leg should still be inserted")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("when next route element is unresolvable, airway may still insert (empty next-leg optional)")
+        void airwayInsertedWhenNextElementUnresolved() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-next");
+            plan.setAircraftIdentification("COVNX");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("XXXX");
+            p2.setLat(0.0);
+            p2.setLon(0.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVNX").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .as("resolveNextLegEnd empty → detour check skipped; airway still valid")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("next leg resolved from fixes map when element has no inline coords")
+        void nextLegFromMapLookupForDetourCheck() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-map");
+            plan.setAircraftIdentification("COVMAP");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("M774");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(0.0);
+            p2.setLon(0.0);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix"),
+                    new GeoPoint("TAKAS", -8.20, 115.50, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M774", -10.0, 113.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVMAP").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "M774".equals(p.getName())))
+                    .as("detour still applied when next coords come from fix map")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("skips airway when it duplicates fix coordinates (< 3 km)")
+        void skipAirwayNearlyCoincidentWithFix() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-dup");
+            plan.setAircraftIdentification("COVDUP");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("NEAR");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            FlightPlan.Position p2 = new FlightPlan.Position();
+            p2.setDesignatedPoint("TAKAS");
+            p2.setLat(-8.20);
+            p2.setLon(115.50);
+            e2.setPosition(p2);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("NEAR", -6.801, 113.201, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVDUP").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "NEAR".equals(p.getName())))
+                    .as("airway ~same coords as fix must be skipped")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("last en-route element uses destination when computing next leg for airway check")
+        void lastEnRouteUsesDestForNextLegEnd() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-last");
+            plan.setAircraftIdentification("COVLAST");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("M774");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("M774", -10.0, 113.0, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVLAST").orElseThrow();
+            assertThat(route.getRoutePoints().stream().noneMatch(p -> "M774".equals(p.getName())))
+                    .as("bogus airway vs G579→dest leg should be skipped")
+                    .isTrue();
+        }
+
+        @Test @DisplayName("handles null position on following element when resolving next leg")
+        void nextLegEmptyWhenFollowingElementHasNullPosition() {
+            FlightPlan plan = new FlightPlan();
+            plan.setId("cov-null");
+            plan.setAircraftIdentification("COVNULL");
+            plan.setFlightType("M");
+            FlightPlan.Departure dep = new FlightPlan.Departure();
+            dep.setDepartureAerodrome("WIII");
+            plan.setDeparture(dep);
+            FlightPlan.Arrival arr = new FlightPlan.Arrival();
+            arr.setDestinationAerodrome("WADD");
+            plan.setArrival(arr);
+
+            FlightPlan.RouteElement e1 = new FlightPlan.RouteElement();
+            e1.setSeqNum(1);
+            FlightPlan.Position p1 = new FlightPlan.Position();
+            p1.setDesignatedPoint("G579");
+            p1.setLat(-6.80);
+            p1.setLon(113.20);
+            e1.setPosition(p1);
+            e1.setAirway("MIDAW");
+
+            FlightPlan.RouteElement e2 = new FlightPlan.RouteElement();
+            e2.setSeqNum(2);
+            e2.setPosition(null);
+            e2.setAirway("DCT");
+
+            FlightPlan.FiledRoute fr = new FlightPlan.FiledRoute();
+            fr.setRouteElement(new ArrayList<>(List.of(e1, e2)));
+            plan.setFiledRoute(fr);
+
+            when(flightDataCache.getFlightPlans()).thenReturn(List.of(plan));
+            when(flightDataCache.getFixes()).thenReturn(List.of(
+                    new GeoPoint("WIII", -6.12, 106.66, "fix"),
+                    new GeoPoint("WADD", -8.75, 115.17, "fix")
+            ));
+            when(flightDataCache.getAirways()).thenReturn(List.of(
+                    new GeoPoint("MIDAW", -7.50, 114.35, "airway")
+            ));
+            when(flightDataCache.getLastRefreshed()).thenReturn(Instant.now());
+
+            FlightRoute route = service.resolveRoute("COVNULL").orElseThrow();
+            assertThat(route.getRoutePoints().stream().anyMatch(p -> "MIDAW".equals(p.getName())))
+                    .isTrue();
+        }
+
         @Test @DisplayName("handles null filedRoute gracefully")
         void handlesNullFiledRoute() {
             FlightPlan plan = buildSia200();
