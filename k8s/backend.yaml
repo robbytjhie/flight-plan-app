@@ -33,6 +33,11 @@ spec:
           env:
 #            - name: SPRING_PROFILES_ACTIVE
 #              value: "prod"
+            - name: FLIGHT_API_INSECURE_SSL
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: FLIGHT_API_INSECURE_SSL
             - name: FLIGHT_API_KEY
               valueFrom:
                 secretKeyRef:
