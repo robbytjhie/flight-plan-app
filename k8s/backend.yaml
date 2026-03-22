@@ -49,6 +49,13 @@ spec:
                 secretKeyRef:
                   name: flightplan-secrets
                   key: CORS_ALLOWED_ORIGINS
+            - name: OPENAPI_SERVER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: flightplan-secrets
+                  key: OPENAPI_SERVER_URL
+            - name: OPENAPI_SERVER_DESCRIPTION
+              value: "Staging"
             # Redis leader election
             - name: REDIS_HOST
               value: "redis"
