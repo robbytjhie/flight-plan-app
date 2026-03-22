@@ -8,6 +8,7 @@ on:
   pull_request:
     branches: [ main, develop ]
     paths:    [ 'terraform/**' ]
+  workflow_dispatch:
 
 env:
   AWS_REGION:  'ap-southeast-1'
@@ -17,7 +18,7 @@ jobs:
   terraform:
     name: Terraform ${{ github.event_name == 'pull_request' && 'Plan' || 'Apply' }}
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    environment: production                                                            # was: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }} — single cluster flightplan-prod
 
     defaults:
       run:
@@ -38,6 +39,14 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Create Terraform state bucket if missing
+        run: |
+          aws s3api head-bucket --bucket flight-plan-tfstate 2>/dev/null || \
+          aws s3api create-bucket \
+            --bucket flight-plan-tfstate \
+            --region ap-southeast-1 \
+            --create-bucket-configuration LocationConstraint=ap-southeast-1
+
       - name: Terraform Init
         run: terraform init
 
@@ -48,9 +57,9 @@ jobs:
         id: plan
         run: |
           terraform plan \
-            -var="environment=${{ github.ref == 'refs/heads/main' && 'prod' || 'staging' }}" \
             -var="app_image_tag=latest" \
             -out=tfplan
+          # was: -var="environment=${{ github.ref == 'refs/heads/main' && 'prod' || 'staging' }}" — removed; environment now fixed to prod in variables
         continue-on-error: true
 
       - name: Post plan to PR
